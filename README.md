@@ -3,10 +3,9 @@
 An Emacs-shaped editor for the terminal, in pure Python. Standard library
 only — no C extension, no build step, nothing to install.
 
-This exists because macOS stopped shipping Emacs, and because the Python
-that macOS *does* ship is enough to write one: `curses` and `unicodedata`
-are in the box, so a MacBook out of the shop can edit files the same way
-it always did.
+This exists because macOS stopped shipping Emacs and it is easy to
+install Python via Apple's Command Line Tools, and `curses` and
+`unicodedata` come with them.
 
 ```console
 $ git clone https://github.com/satorux/bkmacs
@@ -23,7 +22,7 @@ inside:
 alias bkmacs='python3 ~/src/bkmacs/bkmacs'
 ```
 
-Python 3.9 or newer, which is what `/usr/bin/python3` already is on macOS.
+Python 3.9 or newer; macOS gives 3.9.6, which is what this is tested on.
 
 ## There is no configuration file
 

@@ -1,9 +1,11 @@
 """bkmacs: an Emacs-shaped editor in the terminal, in pure Python.
 
-Nothing to install and nothing to build -- it runs on the Python that macOS
-ships, which is why it exists at all.  There is no configuration file: the
-defaults are compiled in, and they are one particular set of Emacs habits
-rather than Emacs' own.  See the README for which, and why.
+Nothing to build and nothing to depend on: Python comes with Apple's
+Command Line Tools on macOS, and curses and unicodedata come with it.
+
+There is no configuration file: the defaults are compiled in, and they are
+one particular set of Emacs habits rather than Emacs' own.  See the README
+for which, and why.
 
     python3 -m bkmacs [file ...]
 """
