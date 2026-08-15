@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+# The temporary file the atomic save writes next to the file it is saving,
+# which only exists for the moment between writing and renaming.
+.bkmacs-*.tmp
+
+.DS_Store
