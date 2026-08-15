@@ -148,7 +148,7 @@ class Editor:
         "C-v": "scroll-up", "M-v": "scroll-down", "C-l": "recenter",
         "M-g": "goto-line",
         "RET": "newline", "C-j": "newline-and-indent", "TAB": "indent-for-tab",
-        "C-o": "open-line",
+        "C-o": "open-line", "C-t": "transpose-chars",
         "C-d": "delete-char",
         "DEL": "backward-delete-char", "C-h": "backward-delete-char",
         "M-d": "kill-word", "M-DEL": "backward-kill-word",
@@ -629,6 +629,34 @@ class Editor:
         point = self.buffer.point
         self.buffer.insert("\n")
         self.buffer.point = point
+
+    def transpose_chars(self) -> None:
+        """Swap the two characters around point, and step past them.
+
+        The typo this fixes is usually noticed a moment too late, so Emacs
+        makes the end of a line mean the two characters before it rather than
+        nothing at all -- ``teh`` becomes ``the`` with one key, without going
+        back for it.  A newline is a character like any other here, which is
+        how a stray character at the start of a line gets pulled up onto the
+        end of the line above.
+        """
+        buffer = self.buffer
+        point = buffer.point
+        if point[1] == len(buffer.lines[point[0]]):
+            moved = self.backward(point)
+            if moved is None:
+                self.message = "Beginning of buffer"
+                return
+            point = moved
+        before, after = self.backward(point), self.forward(point)
+        if before is None:
+            self.message = "Beginning of buffer"
+            return
+        if after is None:
+            self.message = "End of buffer"
+            return
+        buffer.edit(before, after, buffer.text_between(point, after)
+                    + buffer.text_between(before, point))
 
     def delete_char(self) -> None:
         end = self.forward(self.buffer.point)

@@ -371,6 +371,16 @@ class SessionTest(unittest.TestCase):
         session.settle(1.0)
         self.assertEqual(self.contents(path), "ONE two ONE two\n")
 
+    def test_transpose_chars(self):
+        path = self.file("t.txt", "teh\nx\ny\n")
+        session = self.start(path)
+        session.send(CTRL["e"])  # At the end of the line: fixes the typo.
+        session.send(CTRL["t"])
+        session.send(CTRL["n"] + CTRL["a"])  # Start of "x": swaps it with the
+        session.send(CTRL["t"])  # newline, pulling it up and leaving a blank.
+        session.settle(1.0)
+        self.assertEqual(self.contents(path), "thex\n\ny\n")
+
     def test_region_kill_and_yank(self):
         path = self.file("d.txt", "abcdef\n")
         session = self.start(path)

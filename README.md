@@ -92,6 +92,7 @@ key of the same effect.
 | `C-j` | newline-and-indent | copies the current line's indentation |
 | `TAB` | indent | two spaces, never a tab character |
 | `C-o` | open-line | |
+| `C-t` | transpose-chars | at the end of a line, the two characters before it |
 | `C-d` | delete-char | |
 | `DEL` `C-h` | backward-delete-char-untabify | both, and a tab deletes as the spaces it was showing |
 | `M-d` `M-DEL` | kill-word, backward-kill-word | |
