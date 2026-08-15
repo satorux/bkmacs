@@ -21,7 +21,8 @@ from .buffer import Buffer, KillRing, Pos, advance, adjust
 from .display import (Display, Window, back_screen, point_screen, screen_rows,
                       segment_point)
 from .history import History
-from .layout import display_width, expand, fill, index_at_column, pad, unfill
+from .layout import (display_width, expand, fill, index_at_column, pad,
+                     span_at_columns, unfill)
 from .search import glob_regexp, search_backward, search_forward
 from .term import Terminal, with_meta
 
@@ -168,7 +169,14 @@ class Editor:
     #: Commands with no key of their own, reachable through M-x.
     EXTRA = ("grep", "occur", "next-error", "revert-buffer")
 
+    #: ``C-x r``, which in Emacs holds the registers as well.  Here it is the
+    #: rectangles and nothing else.
+    RECTANGLE = {
+        "k": "kill-rectangle", "y": "yank-rectangle", "t": "string-rectangle",
+    }
+
     CTRL_X = {
+        "r": RECTANGLE,  # A prefix of its own; see dispatch.
         "C-f": "find-file", "C-s": "save-buffer",
         "C-c": "save-buffers-kill-terminal",
         "b": "switch-to-buffer", "k": "kill-buffer", "C-b": "list-buffers",
@@ -183,6 +191,8 @@ class Editor:
         self.term = Terminal(stdscr)
         self.display = Display(stdscr)
         self.kill_ring = KillRing()
+        #: The last killed rectangle, which is a ring of one in Emacs too.
+        self.killed_rectangle: list[str] = []
         self.history = History()
         self.buffers: list[Buffer] = [Buffer.from_file(path) for path in paths]
         if not self.buffers:
@@ -278,15 +288,7 @@ class Editor:
                           else with_meta(second))
             return
         if key == "C-x":
-            second = self.prefix("C-x-")
-            if second is None:
-                return
-            name = self.CTRL_X.get(second)
-            if name is None:
-                self.message = "C-x %s is undefined" % second
-                self.last_command = ""
-                return
-            self.invoke(name)
+            self.prefixed("C-x", self.CTRL_X)
         elif key in self.BINDINGS:
             self.invoke(self.BINDINGS[key])
         elif len(key) == 1 and key.isprintable():
@@ -294,6 +296,24 @@ class Editor:
         else:
             self.message = "%s is undefined" % key
             self.last_command = ""
+
+    def prefixed(self, label: str, table: dict) -> None:
+        """Read the rest of a prefixed key sequence and run what it names.
+
+        A table can hold another table, which is how ``C-x r`` is a prefix
+        under a prefix without being a special case anywhere else.
+        """
+        key = self.prefix(label + "-")
+        if key is None:
+            return
+        name = table.get(key)
+        if isinstance(name, dict):
+            self.prefixed("%s %s" % (label, key), name)
+        elif name is None:
+            self.message = "%s %s is undefined" % (label, key)
+            self.last_command = ""
+        else:
+            self.invoke(name)
 
     def invoke(self, name: str) -> None:
         buffer = self.buffer
@@ -314,9 +334,10 @@ class Editor:
         self.after("self-insert", buffer, revision)
 
     def commands(self) -> list[str]:
-        names = set(self.BINDINGS.values()) | set(self.CTRL_X.values())
-        names.update(self.EXTRA)
-        names.discard("prefix")
+        names = set(self.BINDINGS.values()) | set(self.EXTRA)
+        for table in (self.CTRL_X, self.RECTANGLE):
+            names.update(name for name in table.values()
+                         if isinstance(name, str))
         names.discard("ignore")
         return sorted(names)
 
@@ -814,6 +835,94 @@ class Editor:
         self.buffer.edit(span[0], span[1],
                          convert(self.buffer.text_between(*span)))
         self.buffer.point = self.buffer.clamp(point)
+
+    # -- rectangles ------------------------------------------------------
+
+    def rectangle(self) -> Optional[tuple[int, int, int, int]]:
+        """The rows and display columns point and mark mark out.
+
+        A rectangle is the region read as a shape instead of as a run of
+        text: every row between point and mark, cut at the two columns they
+        sit in, whichever corner each of them happens to be.
+        """
+        span = self.region()
+        if span is None:
+            return None
+        left = self.display_column(span[0])
+        right = self.display_column(span[1])
+        if left > right:
+            left, right = right, left
+        return (span[0][0], span[1][0], left, right)
+
+    def rectangle_span(self, row: int, left: int, right: int) -> tuple[int, int]:
+        """Where a rectangle's columns fall in one row's characters."""
+        columns = expand(self.buffer.lines[row]).columns
+        return span_at_columns(columns, left, right)
+
+    def put_at_column(self, row: int, left: int, right: int, text: str) -> None:
+        """Put ``text`` at column ``left`` on ``row``, over what reaches
+        ``right``.
+
+        A line too short to reach the column is padded out with spaces first,
+        as it has to be for the rectangle to be a rectangle at all.
+        """
+        buffer = self.buffer
+        line = buffer.lines[row]
+        width = expand(line).columns[-1]
+        if width < left:
+            buffer.edit((row, len(line)), (row, len(line)),
+                        " " * (left - width) + text)
+            return
+        begin, end = self.rectangle_span(row, left, right)
+        buffer.edit((row, begin), (row, end), text)
+
+    def kill_rectangle(self) -> None:
+        """Cut the rectangle out, closing the gap left by every row."""
+        area = self.rectangle()
+        if area is None:
+            return
+        top, bottom, left, right = area
+        buffer = self.buffer
+        spans = [self.rectangle_span(row, left, right)
+                 for row in range(top, bottom + 1)]
+        pieces = [buffer.lines[top + offset][begin:end]
+                  for offset, (begin, end) in enumerate(spans)]
+        for offset in range(len(spans) - 1, -1, -1):
+            begin, end = spans[offset]
+            if begin != end:
+                buffer.edit((top + offset, begin), (top + offset, end), "")
+        self.killed_rectangle = pieces
+        buffer.point = buffer.clamp((top, spans[0][0]))
+
+    def yank_rectangle(self) -> None:
+        """Put the killed rectangle back, its top left corner at point."""
+        if not self.killed_rectangle:
+            self.message = "No rectangle to yank"
+            return
+        buffer = self.buffer
+        row = buffer.point[0]
+        column = self.display_column(buffer.point)
+        for offset, piece in enumerate(self.killed_rectangle):
+            if row + offset >= len(buffer.lines):
+                buffer.edit(buffer.last, buffer.last, "\n")
+            self.put_at_column(row + offset, column, column, piece)
+
+    def string_rectangle(self) -> None:
+        """Replace each row's slice of the rectangle with a string.
+
+        Point and mark in the same column make a rectangle with no width,
+        and this becomes what it is usually wanted for: the same text down
+        the same column of a run of lines.
+        """
+        area = self.rectangle()
+        if area is None:
+            return
+        text = self.read_string("String rectangle: ", kind="rectangle")
+        if text is None:
+            return
+        top, bottom, left, right = area
+        for row in range(bottom, top - 1, -1):
+            self.put_at_column(row, left, right, text)
 
     # -- files and buffers -----------------------------------------------
 

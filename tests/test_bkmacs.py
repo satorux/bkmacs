@@ -18,8 +18,8 @@ from bkmacs.buffer import Buffer, KillRing, advance, adjust
 from bkmacs.editor import in_columns
 from bkmacs.history import History
 from bkmacs.layout import (char_width, display_width, expand, fill,
-                           index_at_column, joinable, split_columns,
-                           truncate, unfill)
+                           index_at_column, joinable, span_at_columns,
+                           split_columns, truncate, unfill)
 from bkmacs.search import glob_regexp, search_backward, search_forward
 
 
@@ -55,6 +55,17 @@ class TestLayout(unittest.TestCase):
         self.assertEqual(index_at_column(columns, 1), 0)  # Second half of あ.
         self.assertEqual(index_at_column(columns, 2), 1)
         self.assertEqual(index_at_column(columns, 99), 2)  # End of line.
+
+    def test_span_at_columns_takes_only_whole_characters(self):
+        columns = expand("aあいb").columns  # Columns 0, 1, 3, 5.
+        self.assertEqual(span_at_columns(columns, 1, 5), (1, 3))  # あい.
+        # Both edges inside a wide character, which is therefore left alone.
+        self.assertEqual(span_at_columns(columns, 2, 4), (2, 2))
+        self.assertEqual(span_at_columns(columns, 0, 99), (0, 4))
+        # No width is a place to insert, and covers nothing.
+        self.assertEqual(span_at_columns(columns, 3, 3), (2, 2))
+        # Past the end of the line: nothing to take, and still a valid index.
+        self.assertEqual(span_at_columns(columns, 20, 30), (4, 4))
 
     def test_split_leaves_room_for_the_continuation_marker(self):
         segments = split_columns("abcdefghij", 5)

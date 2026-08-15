@@ -392,6 +392,34 @@ class SessionTest(unittest.TestCase):
         session.settle(1.0)
         self.assertEqual(self.contents(path), "defabc\n")
 
+    def test_kill_and_yank_rectangle(self):
+        path = self.file("r.txt", "abcdef\nabcdef\nabcdef\n")
+        session = self.start(path)
+        session.send(CTRL["f"])
+        session.send(SET_MARK)
+        session.send(CTRL["n"] * 2 + CTRL["f"] * 3)  # Corner at row 2, "e".
+        session.send(CTRL["x"] + "r")
+        session.settle(0.2)
+        self.assertIn("C-x r-", session.echo())  # A prefix under a prefix.
+        session.send("k")
+        session.settle(1.0)
+        self.assertEqual(self.contents(path), "aef\naef\naef\n")
+        session.send(CTRL["e"])
+        session.send(CTRL["x"] + "ry")
+        session.settle(1.0)
+        self.assertEqual(self.contents(path), "aefbcd\naefbcd\naefbcd\n")
+
+    def test_string_rectangle_pads_a_line_too_short_to_reach_it(self):
+        path = self.file("s.txt", "aaaa\nb\ncccc\n")
+        session = self.start(path)
+        session.send(CTRL["f"] * 2)
+        session.send(SET_MARK)
+        session.send(CTRL["n"] * 2 + CTRL["f"])  # One column wide, three deep.
+        session.send(ESC + "x" + "string-rectangle" + RET)
+        session.send("X" + RET)
+        session.settle(1.0)
+        self.assertEqual(self.contents(path), "aaXa\nb X\nccXc\n")
+
     def test_undo_by_control_backslash(self):
         path = self.file("e.txt", "keep\n")
         session = self.start(path)

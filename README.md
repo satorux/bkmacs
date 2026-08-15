@@ -110,6 +110,8 @@ key of the same effect.
 | `C-w` `M-w` | kill-region, kill-ring-save | |
 | `C-y` `M-y` | yank, yank-pop | the ring holds 60 entries |
 | `C-x C-x` | exchange-point-and-mark | |
+| `C-x r k` `C-x r y` | kill-rectangle, yank-rectangle | the region as a shape; cut by column, so a wide character is never split |
+| `C-x r t` | string-rectangle | a rectangle with no width puts the same text down a column of lines |
 
 ### Searching
 
@@ -267,8 +269,9 @@ appears in the mode line, and `C-x C-s` asks before going ahead.
 ## Not here
 
 Syntax highlighting, major modes, elisp, extension in Python, keyboard
-macros, dabbrev, `M-q`. All deliberate. Windows split horizontally only
-(`C-x 2`), and share the height evenly rather than being resizable.
+macros, dabbrev, registers. All deliberate. `C-x r` holds the rectangle
+commands and nothing else. Windows split horizontally only (`C-x 2`), and
+share the height evenly rather than being resizable.
 
 ## Tests
 

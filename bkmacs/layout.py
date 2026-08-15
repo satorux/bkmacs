@@ -16,7 +16,7 @@ plus a column for every character that went into it.
 from __future__ import annotations
 
 import unicodedata
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from functools import lru_cache
 from typing import NamedTuple
 
@@ -110,6 +110,21 @@ def index_at_column(columns: list[int], column: int) -> int:
     where it started.
     """
     return max(0, bisect_right(columns, column) - 1)
+
+
+def span_at_columns(columns: list[int], left: int, right: int) -> tuple[int, int]:
+    """The characters lying between two display columns, for a rectangle.
+
+    A rectangle is cut by column rather than by character, and a wide
+    character can straddle the cut.  Rather than split one down the middle,
+    both edges move to the nearest character boundary inside the rectangle,
+    so what comes back is what the rectangle covers whole.  A rectangle with
+    no width covers nothing, which is what makes it a place to insert.
+    """
+    begin = min(bisect_left(columns, left), len(columns) - 1)
+    if right <= left:
+        return (begin, begin)
+    return (begin, max(begin, bisect_right(columns, right) - 1))
 
 
 class Segment(NamedTuple):
