@@ -15,6 +15,10 @@ Only UTF-8 is supported, so there is no encoding to detect.  Bytes that are
 not valid UTF-8 are still read, through ``surrogateescape``, and written back
 unchanged -- without that, opening a binary file by mistake would let the
 half-second autosave overwrite it with replacement characters.
+
+An ``*.ossl`` file is an encrypted one: it arrives empty and locked, is filled
+in by :meth:`Buffer.decrypt_with` once somebody has supplied the password, and
+goes back through openssl on the way out.  See :mod:`bkmacs.crypt`.
 """
 
 from __future__ import annotations
@@ -22,6 +26,8 @@ from __future__ import annotations
 import os
 import time
 from typing import NamedTuple, Optional
+
+from . import crypt
 
 #: A position in the buffer: a row, and a character index within that row.
 #: Not a display column -- the screen has to ask :mod:`bkmacs.layout` for that.
@@ -103,6 +109,19 @@ class Buffer:
         #: use this, and they are read-only, so nothing has to keep it in step
         #: with edits.
         self.highlights: dict[int, tuple[tuple[int, int], ...]] = {}
+
+        #: An ``*.ossl`` file: read and written through :mod:`bkmacs.crypt`.
+        self.encrypted = False
+        #: Encrypted, and not yet decrypted -- so this is an empty read-only
+        #: buffer standing in for a file nobody has typed the password for.
+        self.locked = False
+        #: The password prompt was answered with C-g.  Kept so that the editor
+        #: asks once and then leaves it alone, rather than asking again on
+        #: every trip round the key loop.
+        self.declined = False
+        #: The password this file was opened with, held for as long as the
+        #: buffer is, so that saving does not ask for it again.
+        self.password: Optional[str] = None
 
         self._undo: list[list[Change]] = []
         self._group: list[Change] = []
@@ -216,21 +235,52 @@ class Buffer:
     @classmethod
     def from_file(cls, path: str) -> "Buffer":
         path = os.path.abspath(path)
-        name = os.path.basename(path) or path
+        buffer = cls(os.path.basename(path) or path, path)
+        buffer.encrypted = crypt.is_encrypted(path)
+        if buffer.encrypted:
+            # There is nothing to read until somebody has typed a password,
+            # and asking for one needs the screen -- which is not this
+            # module's business.  The buffer arrives empty and read-only, and
+            # the editor fills it in on the way to showing it.
+            buffer.locked = os.path.exists(path)
+            buffer.read_only = buffer.locked
+            return buffer
         try:
             with open(path, "r", encoding="utf-8", errors="surrogateescape",
                       newline="") as handle:
                 content = handle.read()
         except FileNotFoundError:
-            buffer = cls(name, path)  # A new file, as Emacs would open it.
-            return buffer
-        buffer = cls(name, path)
-        if "\r\n" in content:
-            buffer.newline = "\r\n"
-            content = content.replace("\r\n", "\n")
-        buffer.lines = content.split("\n")
+            return buffer  # A new file, as Emacs would open it.
+        buffer.adopt(content)
         buffer.disk_mtime = os.path.getmtime(path)
         return buffer
+
+    def adopt(self, content: str) -> None:
+        """Take a file's whole text as the buffer's."""
+        if "\r\n" in content:
+            self.newline = "\r\n"
+            content = content.replace("\r\n", "\n")
+        self.lines = content.split("\n")
+
+    def decrypt_with(self, password: str) -> bool:
+        """Fill an encrypted buffer in.  Returns whether the file was still in
+        the old format, which saving will convert.
+
+        Nothing is touched until the decryption has worked, so a wrong
+        password leaves whatever was in the buffer where it was -- which
+        matters for reverting, where that is the only copy of the edits.
+        """
+        text, legacy = crypt.decrypt(self.path, password)
+        mtime = os.path.getmtime(self.path)
+        self.adopt(text)
+        self.password = password
+        self.disk_mtime = mtime
+        self.locked = self.declined = self.read_only = False
+        self.modified = self.conflict = False
+        self.reset_history()  # The old changes no longer describe this text.
+        self.point = self.clamp(self.point)
+        self.mark, self.mark_active = None, False
+        return legacy
 
     def externally_changed(self) -> bool:
         """Has the file moved out from under us since we last wrote it?"""
@@ -254,19 +304,21 @@ class Buffer:
         """
         if self.path is None:
             raise ValueError("buffer has no file")
+        if self.locked:
+            raise ValueError("%s has not been decrypted" % self.name)
+        if self.encrypted and self.password is None:
+            raise ValueError("%s has no password" % self.name)
         directory = os.path.dirname(self.path) or "."
         temporary = os.path.join(directory, ".bkmacs-%d.tmp" % os.getpid())
         try:
-            mode = None
             try:
                 mode = os.stat(self.path).st_mode
             except OSError:
-                pass
-            with open(temporary, "w", encoding="utf-8",
-                      errors="surrogateescape", newline="") as handle:
-                handle.write(self.encoded())
-                handle.flush()
-                os.fsync(handle.fileno())
+                # A file that did not exist yet.  An encrypted one is nobody
+                # else's business; everything else takes the umask, as an
+                # ordinary program's output would.
+                mode = 0o600 if self.encrypted else None
+            self.write_to(temporary)
             if mode is not None:
                 os.chmod(temporary, mode)
             os.replace(temporary, self.path)
@@ -282,6 +334,23 @@ class Buffer:
             self.disk_mtime = os.path.getmtime(self.path)
         except OSError:
             self.disk_mtime = time.time()
+
+    def write_to(self, temporary: str) -> None:
+        """Put the buffer's text in a file of its own, ready to be renamed
+        over the real one.
+
+        An encrypted buffer is the reason this is a method: openssl writes the
+        file itself, and the plain text goes to it down a pipe rather than
+        through anything with a name on the disk.
+        """
+        if self.encrypted:
+            crypt.encrypt(self.encoded(), self.password, temporary)
+            return
+        with open(temporary, "w", encoding="utf-8",
+                  errors="surrogateescape", newline="") as handle:
+            handle.write(self.encoded())
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 class KillRing:

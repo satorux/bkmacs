@@ -382,6 +382,11 @@ class Display:
             return "Occur"
         if buffer.name == "*Completions*":
             return "Completion List"
+        if buffer.encrypted:
+            # Worth a word of its own on the line: this is the one kind of
+            # buffer that is not being autosaved, so ``**`` on it means what
+            # it means everywhere else and nowhere else here -- unsaved work.
+            return "Encrypted"
         return "Fundamental"
 
     def _where(self, buffer: Buffer, rows: list[ScreenPos]) -> str:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import os
 import pty
+import shutil
 import signal
 import struct
 import subprocess
@@ -25,6 +26,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, ROOT)
 
+from bkmacs.crypt import ITERATIONS  # noqa: E402
 from bkmacs.layout import char_width  # noqa: E402
 
 CSI_PARAMETERS = "0123456789;?<=>!"
@@ -1087,6 +1089,79 @@ class SessionTest(unittest.TestCase):
         session.send(CTRL["x"] + CTRL["c"])
         session.process.wait(timeout=5)
         self.assertEqual(session.process.returncode, 0)
+
+    # -- encrypted files -------------------------------------------------
+
+    PASSWORD = "correct horse"
+
+    def encrypted(self, name: str, content: str) -> str:
+        """A file written by openssl enc from the command line."""
+        path = os.path.join(self.directory, name)
+        subprocess.run(["openssl", "enc", "-e", "-pbkdf2", "-iter",
+                        str(ITERATIONS), "-md", "sha256", "-base64",
+                        "-aes-256-cbc", "-salt",
+                        "-pass", "pass:" + self.PASSWORD, "-out", path],
+                       input=content.encode("utf-8"), check=True,
+                       stderr=subprocess.DEVNULL)
+        return path
+
+    def decrypted(self, path: str) -> str:
+        """The same file read back by openssl enc, the same way."""
+        done = subprocess.run(["openssl", "enc", "-d", "-pbkdf2", "-iter",
+                               str(ITERATIONS), "-md", "sha256", "-base64",
+                               "-aes-256-cbc",
+                               "-pass", "pass:" + self.PASSWORD, "-in", path],
+                              stdout=subprocess.PIPE, check=True,
+                              stderr=subprocess.DEVNULL)
+        return done.stdout.decode("utf-8")
+
+    @unittest.skipIf(shutil.which("openssl") is None, "no openssl")
+    def test_an_encrypted_file_asks_for_its_password(self):
+        path = self.encrypted("notes.ossl", "秘密\nsecond line\n")
+        store = os.path.join(self.directory, "history.json")
+        session = self.start(path, history=store)
+        self.assertIn("Password for", session.echo())
+
+        session.send("nope")
+        self.assertIn("****", session.echo())  # Echoed, but not shown.
+        self.assertNotIn("nope", session.echo())
+        session.send(RET)
+        session.settle(2.0)
+        self.assertIn("Wrong password", session.echo())
+
+        session.send(self.PASSWORD + RET)
+        session.settle(2.0)
+        self.assertIn("秘密", session.screen())
+        self.assertIn("(Encrypted)", session.mode_line())
+
+        # No autosave here, however long the typing stops for: half a second
+        # of PBKDF2 between keystrokes is not something anyone wants.
+        session.send(CTRL["e"] + "!")
+        session.settle(1.5)
+        self.assertEqual(self.decrypted(path), "秘密\nsecond line\n")
+        self.assertIn("**", session.mode_line())
+
+        session.send(CTRL["x"] + CTRL["s"])
+        session.settle(3.0)
+        self.assertEqual(self.decrypted(path), "秘密!\nsecond line\n")
+        self.assertIn("Wrote", session.echo())
+        # The password went nowhere near the minibuffer history file.
+        if os.path.exists(store):
+            self.assertNotIn(self.PASSWORD, self.contents(store))
+
+    @unittest.skipIf(shutil.which("openssl") is None, "no openssl")
+    def test_exiting_asks_before_saving_an_encrypted_file(self):
+        path = self.encrypted("notes.ossl", "one\n")
+        session = self.start(path)
+        session.send(self.PASSWORD + RET)
+        session.settle(2.0)
+        session.send("two ")
+        session.send(CTRL["x"] + CTRL["c"])
+        session.settle(0.5)
+        self.assertIn("Save file", session.echo())
+        session.send("y")
+        session.process.wait(timeout=10)
+        self.assertEqual(self.decrypted(path), "two one\n")
 
     def process_state(self, pid: int) -> str:
         """The first letter of the process state, on macOS as well as Linux."""

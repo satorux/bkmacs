@@ -7,6 +7,8 @@ so that there is still nothing to install.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -14,6 +16,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import bkmacs.history
+from bkmacs import crypt
 from bkmacs.buffer import Buffer, KillRing, advance, adjust
 from bkmacs.editor import in_columns
 from bkmacs.history import History
@@ -270,6 +273,97 @@ class TestFiles(unittest.TestCase):
         buffer = Buffer.from_file(self.path("new.txt"))
         self.assertEqual(buffer.lines, [""])
         self.assertIsNone(buffer.disk_mtime)
+
+
+@unittest.skipIf(shutil.which("openssl") is None, "openssl is not installed")
+class TestEncrypted(unittest.TestCase):
+    """Files written by ``openssl enc`` from the command line.
+
+    The point of these is compatibility, so the fixtures are made by calling
+    openssl directly rather than by calling our own encrypt: a round trip
+    through one implementation would pass no matter what the format was.
+    """
+
+    PASSWORD = "correct horse"
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+
+    def path(self, name: str) -> str:
+        return os.path.join(self.directory, name)
+
+    def openssl_encrypt(self, name: str, text: str, pbkdf2: bool = True) -> str:
+        path = self.path(name)
+        derivation = ["-pbkdf2", "-iter", str(crypt.ITERATIONS)] if pbkdf2 else []
+        subprocess.run(["openssl", "enc", "-e"] + derivation
+                       + ["-md", "sha256", "-base64", "-aes-256-cbc", "-salt",
+                          "-pass", "pass:" + self.PASSWORD, "-out", path],
+                       input=text.encode("utf-8"), check=True,
+                       stderr=subprocess.DEVNULL)
+        return path
+
+    def openssl_decrypt(self, path: str) -> str:
+        done = subprocess.run(
+            ["openssl", "enc", "-d", "-pbkdf2", "-iter",
+             str(crypt.ITERATIONS), "-md", "sha256", "-base64",
+             "-aes-256-cbc", "-pass", "pass:" + self.PASSWORD, "-in", path],
+            stdout=subprocess.PIPE, check=True, stderr=subprocess.DEVNULL)
+        return done.stdout.decode("utf-8")
+
+    def test_reads_what_openssl_wrote(self):
+        path = self.openssl_encrypt("notes.ossl", "秘密\nsecond line\n")
+        buffer = Buffer.from_file(path)
+        self.assertTrue(buffer.locked and buffer.read_only)
+        self.assertEqual(buffer.lines, [""])  # Nothing until it is unlocked.
+        self.assertFalse(buffer.decrypt_with(self.PASSWORD))
+        self.assertEqual(buffer.lines, ["秘密", "second line", ""])
+        self.assertFalse(buffer.locked or buffer.read_only or buffer.modified)
+
+    def test_openssl_reads_what_we_wrote(self):
+        path = self.openssl_encrypt("notes.ossl", "one\n")
+        buffer = Buffer.from_file(path)
+        buffer.decrypt_with(self.PASSWORD)
+        buffer.point = (1, 0)
+        buffer.insert("two\n")
+        buffer.save()
+        self.assertEqual(self.openssl_decrypt(path), "one\ntwo\n")
+
+    def test_the_old_key_derivation_is_read_and_migrated(self):
+        path = self.openssl_encrypt("old.ossl", "ancient\n", pbkdf2=False)
+        buffer = Buffer.from_file(path)
+        self.assertTrue(buffer.decrypt_with(self.PASSWORD))  # Said so.
+        buffer.insert("x")
+        buffer.save()
+        self.assertEqual(self.openssl_decrypt(path), "xancient\n")  # Now PBKDF2.
+
+    def test_a_wrong_password_is_refused(self):
+        path = self.openssl_encrypt("notes.ossl", "secret\n")
+        buffer = Buffer.from_file(path)
+        with self.assertRaises(crypt.CryptError):
+            buffer.decrypt_with("horse correct")
+        self.assertTrue(buffer.locked)  # Still shut, and still empty.
+        self.assertEqual(buffer.lines, [""])
+
+    def test_nothing_plain_is_left_behind_and_the_file_is_private(self):
+        path = self.path("new.ossl")
+        buffer = Buffer.from_file(path)  # A file that does not exist yet.
+        self.assertTrue(buffer.encrypted)
+        self.assertFalse(buffer.locked)
+        buffer.password = self.PASSWORD
+        buffer.insert("plain text\n")
+        buffer.save()
+        self.assertEqual(os.listdir(self.directory), ["new.ossl"])
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        with open(path, "rb") as handle:
+            self.assertNotIn(b"plain", handle.read())
+        self.assertEqual(self.openssl_decrypt(path), "plain text\n")
+
+    def test_saving_without_a_password_refuses_rather_than_writing_plain(self):
+        buffer = Buffer.from_file(self.path("new.ossl"))
+        buffer.insert("secret\n")
+        with self.assertRaises(ValueError):
+            buffer.save()
+        self.assertEqual(os.listdir(self.directory), [])
 
 
 class TestKillRing(unittest.TestCase):

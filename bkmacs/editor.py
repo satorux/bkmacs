@@ -17,6 +17,7 @@ import os
 import re
 from typing import Optional
 
+from . import crypt
 from .buffer import Buffer, KillRing, Pos, advance, adjust
 from .display import (Display, Window, back_screen, point_screen, screen_rows,
                       segment_point)
@@ -243,6 +244,11 @@ class Editor:
 
     def run(self) -> None:
         while self.running:
+            # An encrypted file is asked about the moment it is looked at,
+            # wherever it was opened from -- the command line, C-x C-f, a grep
+            # hit -- rather than at each of those places separately.
+            if self.buffer.locked and not self.buffer.declined:
+                self.unlock(self.buffer)
             self.redisplay()
             key = self.pending or self.read_key()
             self.pending = None
@@ -251,8 +257,12 @@ class Editor:
 
     def read_key(self) -> Optional[str]:
         """Wait for a key, waking up to save if the typing stops."""
+        # Encrypted buffers are left out: half a second of PBKDF2 in the
+        # middle of a sentence is not an autosave, it is a stutter.  They are
+        # saved by C-x C-s, and asked about on the way out.
         waiting = [b for b in self.buffers
-                   if b.modified and b.path is not None and not b.conflict]
+                   if b.modified and b.path is not None and not b.conflict
+                   and not b.encrypted]
         key = self.term.read_key(AUTOSAVE_MS if waiting else None)
         if key is None:
             for buffer in waiting:
@@ -940,6 +950,9 @@ class Editor:
         """Visit ``path``, reusing its buffer if it is already open."""
         for index, buffer in enumerate(self.buffers):
             if buffer.path == path:
+                # Visiting a locked file again is how you get a second go at
+                # its password after quitting out of the prompt.
+                buffer.declined = False
                 self.select(index)
                 return True
         self.buffers.append(Buffer.from_file(path))
@@ -978,6 +991,9 @@ class Editor:
                 return
             buffer.path = os.path.abspath(os.path.expanduser(answer))
             buffer.name = os.path.basename(buffer.path)
+            # Saving a scratch buffer under an .ossl name makes it encrypted,
+            # which is the only way to start a new memo from inside here.
+            buffer.encrypted = crypt.is_encrypted(buffer.path)
         if not buffer.modified and not buffer.conflict:
             self.message = "(No changes need to be saved)"
             return
@@ -987,8 +1003,86 @@ class Editor:
             if not self.yes_or_no(question):
                 self.message = "Save not confirmed"
                 return
-        buffer.save()
+        if buffer.encrypted:
+            if not self.write_encrypted(buffer):
+                return
+        else:
+            buffer.save()
         self.message = "Wrote %s" % abbreviate(buffer.path)
+
+    # -- encrypted files -------------------------------------------------
+
+    def unlock(self, buffer: Buffer) -> bool:
+        """Ask for a password until the file opens, or until C-g.
+
+        The complaint goes in the prompt rather than the echo area, because
+        the echo area is where the prompt is: a message put there would be
+        painted over by the next question before it could be read.
+        """
+        note = ""
+        while True:
+            password = self.read_password(
+                "%sPassword for %s: " % (note, abbreviate(buffer.path)))
+            if password is None:
+                buffer.declined = True
+                if buffer.locked:
+                    self.message = ("%s is encrypted; C-x C-f it again, or "
+                                    "M-x revert-buffer, to try the password "
+                                    "once more" % buffer.name)
+                return False
+            try:
+                legacy = buffer.decrypt_with(password)
+            except crypt.CryptError as error:
+                note = "%s.  " % error
+                continue
+            except OSError as error:
+                self.message = str(error)
+                return False
+            self.message = ""
+            if legacy:
+                self.message = ("%s still uses the old key derivation; "
+                                "saving converts it" % buffer.name)
+            return True
+
+    def new_password(self, buffer: Buffer) -> Optional[str]:
+        """Ask twice for the password of a file that has not got one yet.
+
+        Twice because there is nothing to check the first answer against: a
+        typo here would not be found out until the file was next opened, by
+        which time the text it is protecting is gone.
+        """
+        note = ""
+        while True:
+            first = self.read_password("%sPassword for new %s: "
+                                       % (note, buffer.name))
+            if not first:
+                return None
+            again = self.read_password("Confirm password: ")
+            if again is None:
+                return None
+            if first == again:
+                return first
+            note = "Passwords do not match.  "
+
+    def write_encrypted(self, buffer: Buffer) -> bool:
+        """Save an encrypted buffer, asking for a password if it has none.
+
+        The screen says what is happening first: PBKDF2 with six hundred
+        thousand rounds takes long enough to look like a hung editor.
+        """
+        if buffer.password is None:
+            password = self.new_password(buffer)
+            if password is None:
+                self.message = "Save cancelled"
+                return False
+            buffer.password = password
+        self.redisplay(message="Saving %s..." % abbreviate(buffer.path))
+        try:
+            buffer.save()
+        except (crypt.CryptError, OSError, ValueError) as error:
+            self.message = "Save failed: %s" % error
+            return False
+        return True
 
     def switch_to_buffer(self) -> None:
         default = self.buffers[self.previous].name
@@ -1015,11 +1109,17 @@ class Editor:
 
     def kill_buffer(self) -> None:
         buffer = self.buffer
-        if buffer.modified and buffer.path is None:
+        # An encrypted buffer has not been autosaved, so this is the last
+        # chance to write it; an unnamed one has nowhere to be written at all.
+        if buffer.modified and buffer.encrypted and buffer.path is not None:
+            if self.yes_or_no("Save file %s? " % abbreviate(buffer.path)):
+                self.write_encrypted(buffer)
+        if buffer.modified and (buffer.path is None or buffer.encrypted):
             if not self.yes_or_no("Buffer %s modified; kill anyway? "
                                   % buffer.name):
                 return
-        if buffer.modified and buffer.path is not None and not buffer.conflict:
+        elif (buffer.modified and buffer.path is not None
+                and not buffer.conflict):
             buffer.save()
         gone = self.index
         del self.buffers[gone]
@@ -1136,12 +1236,21 @@ class Editor:
 
     def save_buffers_kill_terminal(self) -> None:
         for buffer in self.buffers:
-            if buffer.modified and buffer.path and not buffer.conflict:
-                try:
-                    buffer.save()
-                except OSError as error:
-                    buffer.conflict = True
-                    self.message = str(error)
+            if not buffer.modified or not buffer.path or buffer.conflict:
+                continue
+            if buffer.encrypted:
+                # The one thing here that asks before saving.  Everything else
+                # has been on disk continuously since it was typed, so there
+                # is nothing to ask about; this has not, because encrypting it
+                # every half second was not worth the wait.
+                if self.yes_or_no("Save file %s? " % abbreviate(buffer.path)):
+                    self.write_encrypted(buffer)
+                continue
+            try:
+                buffer.save()
+            except OSError as error:
+                buffer.conflict = True
+                self.message = str(error)
         unsaved = [b for b in self.buffers if b.modified and (b.conflict or b.path)]
         if unsaved:
             names = ", ".join(b.name for b in unsaved)
@@ -1157,6 +1266,14 @@ class Editor:
             return
         if buffer.modified and not self.yes_or_no(
                 "Revert buffer from file %s? " % buffer.path):
+            return
+        if buffer.encrypted:
+            # Ask again rather than reusing the password in hand: reverting is
+            # also how you get back to the prompt after a wrong one, and the
+            # password on disk may not be the password in memory any more.
+            buffer.password, buffer.declined = None, False
+            if self.unlock(buffer):
+                self.message = "Reverted %s" % buffer.name
             return
         fresh = Buffer.from_file(buffer.path)
         buffer.lines = fresh.lines
@@ -1392,7 +1509,8 @@ class Editor:
     # -- the minibuffer --------------------------------------------------
 
     def read_string(self, prompt: str, initial: str = "",
-                    completer=None, kind: str = "") -> Optional[str]:
+                    completer=None, kind: str = "",
+                    secret: bool = False) -> Optional[str]:
         """Read a line in the echo area.  ``None`` means C-g.
 
         An ambiguous TAB opens a *Completions* window below, the way Emacs
@@ -1401,21 +1519,30 @@ class Editor:
         """
         try:
             answer = self.read_loop(prompt, initial, len(initial), completer,
-                                    kind)
+                                    kind, secret)
         finally:
             self.close_completions()
         if answer and kind:
             self.history.add(kind, answer)
         return answer
 
+    def read_password(self, prompt: str) -> Optional[str]:
+        """Read a password, echoed as asterisks the way ``read-passwd`` is.
+
+        No history and no completion: the history ring is a file on the disk,
+        and this is the one answer that must not end up in it.
+        """
+        return self.read_string(prompt, secret=True)
+
     def read_loop(self, prompt: str, text: str, index: int,
-                  completer, kind: str) -> Optional[str]:
+                  completer, kind: str, secret: bool = False) -> Optional[str]:
         note = ""  # "[No match]" and the like, shown next to what was typed.
         walked = -1  # How far back through the ring, -1 being not yet in it.
         typed = text  # What was there before the ring was walked into.
         while True:
-            self.redisplay(minibuffer=(prompt, text + note, index), parens=())
-            key = self.resolve_meta(prompt, text + note, index)
+            shown = ("*" * len(text) if secret else text) + note
+            self.redisplay(minibuffer=(prompt, shown, index), parens=())
+            key = self.resolve_meta(prompt, shown, index)
             if key is None:
                 continue
             if key != "TAB":
@@ -1425,7 +1552,8 @@ class Editor:
             if key in ("C-g", "ESC"):
                 self.message = "Quit"
                 return None
-            if key in ("M-p", "C-p", "M-n", "C-n"):
+            # Not when it is a password being read: there is no ring for one.
+            if key in ("M-p", "C-p", "M-n", "C-n") and not secret:
                 ring = self.history.get(kind)
                 back = key in ("M-p", "C-p")
                 if back and walked + 1 < len(ring):

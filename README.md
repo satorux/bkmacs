@@ -23,6 +23,8 @@ alias bkmacs='python3 ~/src/bkmacs/bkmacs'
 ```
 
 Python 3.9 or newer; macOS gives 3.9.6, which is what this is tested on.
+The one thing outside the standard library is `openssl`, and only for
+[encrypted files](#encrypted-files); it is on macOS already too.
 
 ## There is no configuration file
 
@@ -132,7 +134,7 @@ else.
 | Key | Command | |
 | --- | --- | --- |
 | `C-x C-f` | find-file | `TAB` completes |
-| `C-x C-s` | save-buffer | rarely needed; see the autosave below |
+| `C-x C-s` | save-buffer | rarely needed; see the autosave below — except for [encrypted files](#encrypted-files), where it is the only way |
 | `C-x b` `C-x k` | switch-to-buffer, kill-buffer | |
 | `C-x C-b` | list-buffers | |
 | `M-x revert-buffer` | revert-buffer | |
@@ -265,6 +267,45 @@ Permissions are preserved.
 If the file changes underneath you (`git checkout`, another window), the
 autosave stops rather than overwriting that change, `[disk changed]`
 appears in the mode line, and `C-x C-s` asks before going ahead.
+
+## Encrypted files
+
+A file named `*.ossl` is one encrypted with `openssl enc` — AES-256-CBC
+under a PBKDF2 key, in base64 armour. Exactly this, in other words, and
+the point is that a file written by that line opens here, and one saved
+here opens with it:
+
+```console
+$ openssl enc -e -pbkdf2 -iter 600000 -md sha256 -base64 -aes-256-cbc \
+      -salt -in notes -out notes.ossl
+```
+
+Opening one asks for its password in the minibuffer, echoed as asterisks,
+and asks again as long as you keep getting it wrong. `C-g` gives up and
+leaves the buffer empty and read-only, with `(Encrypted)` in the mode
+line; visiting the file again, or `M-x revert-buffer`, gets you another
+go. The password is then remembered for as long as the buffer is, so
+saving does not ask for it again. It is never written anywhere —
+particularly not to the minibuffer history file.
+
+Encrypted buffers are **not autosaved**: six hundred thousand rounds of
+PBKDF2 half a second after you stop typing is a stutter, not an autosave.
+So `**` in the mode line means what it means everywhere else and nowhere
+else here — unsaved work — and `C-x C-s` is how you write it. `C-x C-c`
+and `C-x k` ask (`Save file ~/notes.ossl?`) rather than doing it quietly.
+No backup copy is made, dated or otherwise.
+
+Saving writes PBKDF2 whatever the file was before, which converts one
+from back when `openssl enc` derived its keys the other way — the old
+format is still read, so a copy predating that change opens too. The
+plain text never touches the disk: it goes to `openssl` down a pipe, and
+only what comes back gets written. The password goes down a pipe of its
+own rather than on a command line or in the environment, either of which
+`ps` would show to anyone on the machine. A new `*.ossl` file asks for a
+password twice, and is created `0600`.
+
+The one thing this needs that nothing else here does is `openssl` on the
+path. It is on macOS by default.
 
 ## Not here
 

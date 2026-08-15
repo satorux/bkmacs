@@ -5,4 +5,8 @@ __pycache__/
 # which only exists for the moment between writing and renaming.
 .bkmacs-*.tmp
 
+# Encrypted files, which are only ever here because somebody was testing
+# against a real one.  Encrypted is not a reason to publish it.
+*.ossl
+
 .DS_Store
