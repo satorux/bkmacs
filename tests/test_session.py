@@ -621,6 +621,44 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(self.contents(os.path.join(self.directory,
                                                     "theirs.txt")), "theirs\n")
 
+    def test_a_numeric_argument_counts_the_next_command(self):
+        path = self.file("u.txt", "one\ntwo\nthree\nfour\nfive\n")
+        session = self.start(path)
+        session.send(CTRL["u"] + "3" + CTRL["n"])   # Three lines down.
+        self.assertModeLine(session, "(4,0)")
+        # The count is how many times to press the key, not what Emacs makes
+        # of it per command: C-k takes a line and then its newline, so four
+        # of them take two lines -- and they join into one kill.
+        session.send(CTRL["u"] + "4" + CTRL["k"])
+        self.assertSaved(path, "one\ntwo\nthree\n")
+        session.send(CTRL["y"])
+        self.assertSaved(path, "one\ntwo\nthree\nfour\nfive\n")
+
+    def test_a_numeric_argument_repeats_a_character(self):
+        path = self.file("d.txt", "")
+        session = self.start(path)
+        session.send(CTRL["u"] + "20" + "-")
+        self.assertSaved(path, "-" * 20)
+        # One edit, so one undo takes the whole rule away again.
+        session.send(UNDO)
+        self.assertSaved(path, "")
+
+    def test_control_u_on_its_own_is_four(self):
+        path = self.file("f.txt", "abcdefghij\n")
+        session = self.start(path)
+        session.send(CTRL["u"] + CTRL["d"])         # Four characters gone.
+        self.assertSaved(path, "efghij\n")
+        session.send(CTRL["u"] + CTRL["u"] + CTRL["d"])  # Sixteen, or what
+        self.assertSaved(path, "")                       # is left of them.
+
+    def test_a_numeric_argument_does_not_repeat_a_question(self):
+        path = self.file("g.txt", "text\n")
+        session = self.start(path)
+        session.send(CTRL["u"] + "3" + CTRL["x"] + CTRL["f"])
+        self.assertEcho(session, "Find file: ")
+        session.send(CTRL["g"])
+        self.assertEcho(session, "Quit")
+
     def test_query_replace(self):
         path = self.file("c.txt", "one two one two\n")
         session = self.start(path)

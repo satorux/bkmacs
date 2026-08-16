@@ -169,10 +169,26 @@ Two windows on one file keep their own positions in it.
 
 | Key | Command | |
 | --- | --- | --- |
+| `C-u` | universal-argument | `C-u 3 C-n`, `C-u 70 -`; on its own it is 4 and `C-u C-u` is 16 |
 | `C-g`, `ESC ESC` | keyboard-quit | |
 | `C-z` | suspend | `fg` brings it back |
 | `M-x` | execute-extended-command | `TAB` completes |
 | `ESC` | Meta prefix | no timeout — see below |
+
+### C-u
+
+`C-u` counts the command after it: `C-u 3 C-n` goes three lines down and
+`C-u 70 -` draws a rule across the page. On its own it is four, and `C-u
+C-u` is sixteen, as in Emacs.
+
+The count is how many times to run the command, which is not always what
+Emacs makes of it. There, `C-u 2 C-k` kills two whole lines; here `C-k`
+takes a line and then takes its newline, so `C-u 4 C-k` is what does.
+Repeating the keystroke is the rule, and being the rule everywhere is
+worth more than a table of exceptions. Commands that ask a question —
+`C-x C-f`, `M-x`, a search — ignore the count, since asking four times is
+not four of anything. There are no negative arguments: `C-u -` in Emacs
+means the same command backwards, and backwards is a key of its own here.
 
 ### ESC
 

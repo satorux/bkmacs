@@ -61,6 +61,17 @@ SCAN_LIMIT = 20000
 #: yank back as four lines rather than one.
 KILL_COMMANDS = {"kill-line", "kill-region", "kill-word", "backward-kill-word"}
 
+#: Commands a numeric argument does not repeat.  Two kinds: the ones that ask
+#: a question, since asking it four times is not four of anything, and the
+#: ones there is nothing to repeat about.
+COUNTLESS = {"find-file", "find-alternate-file", "save-buffer", "write-file",
+             "save-buffers-kill-terminal", "switch-to-buffer", "kill-buffer",
+             "list-buffers", "execute-extended-command", "goto-line",
+             "query-replace", "query-replace-regexp", "grep", "occur",
+             "revert-buffer", "suspend", "keyboard-quit", "isearch-forward",
+             "isearch-backward", "mark-whole-buffer", "quoted-insert",
+             "string-rectangle", "ignore"}
+
 #: Commands that leave the region alone.  Anything else deactivates it, as
 #: transient-mark-mode does.
 MARK_SAFE = {"set-mark-command", "exchange-point-and-mark", "kill-ring-save",
@@ -215,6 +226,7 @@ class Editor:
         "C-/": "undo", "C-_": "undo", "C-\\": "undo",
         "C-g": "keyboard-quit",
         "C-z": "suspend",
+        "C-u": "universal-argument",
         "C-q": "quoted-insert",
         "M-c": "capitalize-word", "M-u": "upcase-word", "M-l": "downcase-word",
         "M-x": "execute-extended-command",
@@ -261,6 +273,8 @@ class Editor:
         self.running = True
         self.last_command = ""
         self.pending: Optional[str] = None
+        #: What C-u counted to, for the one command that comes after it.
+        self.argument: Optional[int] = None
         #: Whether a search reads romaji as Japanese.  On, because a search
         #: that has to be switched into the mode it is nearly always wanted in
         #: is a search that is switched on every time.  It stays wherever the
@@ -368,6 +382,44 @@ class Editor:
             self.message = "%s is undefined" % key
             self.last_command = ""
 
+    def universal_argument(self) -> None:
+        """``C-u``: how many times to do the next thing.
+
+        On its own it is four and ``C-u C-u`` is sixteen, the way Emacs
+        multiplies; digits typed after it are the number itself, so ``C-u 70
+        -`` is a rule across the page and ``C-u 3 C-n`` is three lines down.
+        Whatever follows goes back to the key loop to be run with the count
+        in hand -- including ``C-x`` and ``ESC``, which are prefixes of their
+        own and read their own second key.
+
+        The count is how many times to run the command, which is not always
+        what Emacs makes of it: there, C-u 2 C-k kills two whole lines, while
+        here C-k takes a line and then takes its newline, so it is C-u 4 C-k
+        that does.  Repeating the keystroke is the rule, and it is the rule
+        everywhere rather than a table of exceptions.
+
+        Negative arguments are not here.  ``C-u -`` in Emacs is the same
+        command backwards, and backwards is a different command in every case
+        that matters here; each of them is already on a key of its own.
+        """
+        count, digits, shown = 4, "", "4"
+        while True:
+            key = self.prefix("C-u %s-" % shown)
+            if key is None:
+                return
+            if key == "C-u" and not digits:
+                count *= 4
+            elif len(key) == 1 and key.isdigit():
+                digits += key
+            elif key in ("C-g", "ESC"):
+                self.message = "Quit"
+                return
+            else:
+                self.argument = int(digits) if digits else count
+                self.pending = key  # The command the count is for.
+                return
+            shown = digits or str(count)
+
     def prefixed(self, label: str, table: dict) -> None:
         """Read the rest of a prefixed key sequence and run what it names.
 
@@ -387,19 +439,25 @@ class Editor:
             self.invoke(name)
 
     def invoke(self, name: str) -> None:
-        buffer = self.buffer
-        revision = buffer.revision
-        try:
-            getattr(self, name.replace("-", "_"))()
-        except Exception as error:  # An editor that dies loses the buffer.
-            self.message = "%s: %s" % (type(error).__name__, error)
-        self.after(name, buffer, revision)
+        count, self.argument = self.argument or 1, None
+        for _ in range(1 if name in COUNTLESS else count):
+            buffer = self.buffer  # A command may have changed which one.
+            revision = buffer.revision
+            try:
+                getattr(self, name.replace("-", "_"))()
+            except Exception as error:  # An editor that dies loses the buffer.
+                self.message = "%s: %s" % (type(error).__name__, error)
+                break
+            self.after(name, buffer, revision)
 
     def self_insert(self, character: str) -> None:
+        count, self.argument = self.argument or 1, None
         buffer = self.buffer
         revision = buffer.revision
         try:
-            buffer.insert(character)
+            # One edit rather than ``count`` of them: C-u 70 - is a rule
+            # across the page, and taking it back should be one C-/.
+            buffer.insert(character * count)
         except ValueError as error:
             self.message = str(error)
         self.after("self-insert", buffer, revision)
