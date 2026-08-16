@@ -113,6 +113,7 @@ key of the same effect.
 | `C-w` `M-w` | kill-region, kill-ring-save | |
 | `C-y` `M-y` | yank, yank-pop | the ring holds 60 entries |
 | `C-x C-x` | exchange-point-and-mark | |
+| `C-x h` | mark-whole-buffer | point at the top, the mark at the bottom |
 | `C-x r k` `C-x r y` | kill-rectangle, yank-rectangle | the region as a shape; cut by column, so a wide character is never split |
 | `C-x r t` | string-rectangle | a rectangle with no width puts the same text down a column of lines |
 

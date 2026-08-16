@@ -214,6 +214,7 @@ class Editor:
         "C-c": "save-buffers-kill-terminal",
         "b": "switch-to-buffer", "k": "kill-buffer", "C-b": "list-buffers",
         "C-x": "exchange-point-and-mark", "u": "undo",
+        "h": "mark-whole-buffer",
         " ": "fixup-whitespace", "`": "next-error",
         "2": "split-window-below", "1": "delete-other-windows",
         "0": "delete-window", "o": "other-window",
@@ -892,6 +893,12 @@ class Editor:
         text = convert(self.buffer.text_between(start, end))
         self.buffer.edit(start, end, text)
         self.buffer.point = advance(start, text)
+
+    def mark_whole_buffer(self) -> None:
+        """``C-x h``.  Point at the top and the mark at the bottom, so that
+        the region is all of it and C-w or M-w takes the lot."""
+        self.buffer.mark, self.buffer.mark_active = self.buffer.last, True
+        self.buffer.point = (0, 0)
 
     def case_region(self, convert) -> None:
         span = self.region()

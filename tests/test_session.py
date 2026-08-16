@@ -553,6 +553,16 @@ class SessionTest(unittest.TestCase):
         session.send(CTRL["a"] + CTRL["f"] * 3 + ESC + "u")
         self.assertSaved(path, "HelLO BRAVE new world\n")
 
+    def test_control_x_h_takes_the_whole_buffer(self):
+        path = self.file("all.txt", "one\ntwo\nthree\n")
+        session = self.start(path)
+        session.send(CTRL["n"])            # Somewhere in the middle of it.
+        session.send(CTRL["x"] + "h")
+        session.send(CTRL["w"])            # The region is everything.
+        self.assertSaved(path, "")
+        session.send(CTRL["y"])            # And all of it comes back.
+        self.assertSaved(path, "one\ntwo\nthree\n")
+
     def test_query_replace(self):
         path = self.file("c.txt", "one two one two\n")
         session = self.start(path)
