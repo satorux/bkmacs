@@ -222,7 +222,8 @@ class Editor:
     }
 
     #: Commands with no key of their own, reachable through M-x.
-    EXTRA = ("grep", "occur", "next-error", "revert-buffer")
+    EXTRA = ("grep", "occur", "next-error", "revert-buffer",
+             "query-replace-regexp")
 
     #: ``C-x r``, which in Emacs holds the registers as well.  Here it is the
     #: rectangles and nothing else.
@@ -1960,8 +1961,7 @@ class Editor:
         return "" if migemo.dictionary.available else " [migemo: no dictionary]"
 
     def query_replace(self) -> None:
-        """``M-%``.  One undo group for the whole session, so that a run of
-        replacements can be taken back with a single ``C-/``."""
+        """``M-%``: every match from point on, one question at a time."""
         buffer = self.buffer
         old = self.read_string("Query replace: ", kind="search")
         if not old:
@@ -1971,6 +1971,62 @@ class Editor:
         if new is None:
             return
 
+        def match(position, bound):
+            found = search_forward(buffer, old, position, bound)
+            if found is None:
+                return None
+            return found, (found[0], found[1] + len(old)), new
+
+        self.query_loop("%s with %s" % (old, new), match)
+
+    def query_replace_regexp(self) -> None:
+        """``M-x query-replace-regexp``: the same, by regexp.
+
+        The regexps are Python's, the same ones grep and occur take, and so
+        is the replacement: ``\\1`` is the first group and ``\\g<0>`` the
+        whole match.
+        """
+        buffer = self.buffer
+        pattern = self.read_string("Query replace regexp: ", kind="search")
+        if not pattern:
+            return
+        new = self.read_string("Query replace regexp %s with: " % pattern,
+                               kind="replace")
+        if new is None:
+            return
+        try:
+            regexp = re.compile(pattern,
+                                re.IGNORECASE if pattern == pattern.lower()
+                                else 0)
+        except re.error as error:
+            self.message = "Invalid regexp: %s" % error
+            return
+
+        def match(position, bound):
+            found = search_forward_regexp(buffer, regexp, position, bound)
+            if found is None:
+                return None
+            here = regexp.match(buffer.lines[found[0][0]], found[0][1])
+            try:
+                return found[0], found[1], here.expand(new)
+            except (re.error, IndexError) as error:
+                self.message = "Invalid replacement: %s" % error
+                return None
+
+        self.query_loop("%s with %s" % (pattern, new), match)
+
+    def query_loop(self, label: str, match) -> None:
+        """Walk the matches, asking about each one.
+
+        ``match`` is what tells one kind of replacement from the other: given
+        where to look from, it answers with the span it found and the text to
+        put there, which for a regexp is the expansion of its groups and for
+        a plain search is the string that was typed.
+
+        One undo group for the whole session, so that a run of replacements
+        can be taken back with a single ``C-/``.
+        """
+        buffer = self.buffer
         start, bound = buffer.point, None
         if buffer.mark_active and buffer.mark is not None:
             span = self.region()
@@ -1981,29 +2037,29 @@ class Editor:
 
         position, replaced, quit_early = start, 0, False
         while not quit_early:
-            found = search_forward(buffer, old, position, bound)
+            found = match(position, bound)
             if found is None:
                 break
-            end = (found[0], found[1] + len(old))
-            buffer.point, buffer.mark, buffer.mark_active = found, end, True
+            where, end, text = found
+            buffer.point, buffer.mark, buffer.mark_active = where, end, True
             self.redisplay(
-                message="Query replacing %s with %s: (y, n, !, ., q)"
-                        % (old, new), parens=())
+                message="Query replacing %s: (y, n, !, ., q)" % label,
+                parens=())
             key = self.term.read_key()
             if key in ("y", " "):
-                bound = self.replace_at(found, end, new, bound)
-                position, replaced = advance(found, new), replaced + 1
+                bound = self.replace_at(where, end, text, bound)
+                position, replaced = advance(where, text), replaced + 1
             elif key in ("n", "DEL"):
                 position = end
             elif key == "!":
                 while found is not None:
-                    end = (found[0], found[1] + len(old))
-                    bound = self.replace_at(found, end, new, bound)
-                    position, replaced = advance(found, new), replaced + 1
-                    found = search_forward(buffer, old, position, bound)
+                    where, end, text = found
+                    bound = self.replace_at(where, end, text, bound)
+                    position, replaced = advance(where, text), replaced + 1
+                    found = match(position, bound)
                 break
             elif key == ".":
-                bound = self.replace_at(found, end, new, bound)
+                bound = self.replace_at(where, end, text, bound)
                 replaced += 1
                 break
             elif key in ("q", "RET", "C-g", "ESC"):

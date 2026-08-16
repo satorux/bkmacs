@@ -126,13 +126,14 @@ key of the same effect.
 | `C-s C-s` `C-r C-r` | isearch-repeat | with nothing typed, the search you did last |
 | `M-m` | migemo, inside a search | on to begin with; `M-m` turns it off, `DEL` takes that back too |
 | `M-%` | query-replace | `y` `n` `!` `.` `q`; one undo takes back the whole session |
+| `M-x query-replace-regexp` | query-replace-regexp | the same questions, by regexp; `\1` is the first group |
 | `M-x grep` | grep | Python regexps, over a tree of files |
 | `M-x occur` | occur | the same, over this buffer |
 | `C-x \`` | next-error | walks the hits of whichever ran last |
 
 A pattern typed in lower case ignores case; one capital letter makes it
-exact. With the region active, query-replace works inside it and nowhere
-else.
+exact. With the region active, either query-replace works inside it and
+nowhere else.
 
 A search shows what it found by highlighting it, and leaves point at the
 end of the match going forwards and at the front of it going backwards,

@@ -573,6 +573,27 @@ class SessionTest(unittest.TestCase):
         # And it is shown the way control characters are shown.
         self.assertRow(session, 0, "^L")
 
+    def test_query_replace_regexp(self):
+        path = self.file("r.txt", "one 1, two 22, three 333\n")
+        session = self.start(path)
+        session.send(ESC + "x" + "query-replace-regexp" + RET)
+        session.send(r"(\d+)" + RET)
+        session.send(r"<\1>" + RET)
+        self.assertEcho(session, "Query replacing")
+        session.send("y")          # The first, with its group expanded.
+        session.send("n")          # Not the second.
+        session.send("!")          # And the rest without asking.
+        self.assertSaved(path, "one <1>, two 22, three <333>\n")
+
+    def test_query_replace_regexp_stays_inside_the_region(self):
+        path = self.file("s.txt", "aa\naa\naa\n")
+        session = self.start(path)
+        session.send(SET_MARK + CTRL["n"] + CTRL["n"])  # The first two lines.
+        session.send(ESC + "x" + "query-replace-regexp" + RET)
+        session.send("a+" + RET + "b" + RET)
+        session.send("!")
+        self.assertSaved(path, "b\nb\naa\n")
+
     def test_query_replace(self):
         path = self.file("c.txt", "one two one two\n")
         session = self.start(path)
