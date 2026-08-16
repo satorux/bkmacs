@@ -20,14 +20,18 @@ __version__ = "0.1.0"
 
 def main(argv: "list[str] | None" = None) -> int:
     from .editor import Editor
-    from .term import setup_locale
+    from .term import background_is_light, setup_locale
 
     paths = list(sys.argv[1:] if argv is None else argv)
     warning = ("" if setup_locale()
                else "Terminal is not UTF-8; Japanese will not display")
+    # Asked here rather than from inside the editor, because the terminal
+    # answers on the keyboard and curses has not started listening yet.  A
+    # terminal that will not say is taken to be dark, which is what one is.
+    light = background_is_light() is True
 
     def start(stdscr) -> None:
-        editor = Editor(stdscr, paths, warning)
+        editor = Editor(stdscr, paths, warning, light)
         try:
             editor.run()
         finally:

@@ -53,19 +53,23 @@ and there are no defaults hiding anywhere else.
 UTF-8 only. Bytes that are not valid UTF-8 are shown in octal, like
 Emacs, and written back untouched.
 
-Color, but never a background color. A terminal theme is exactly a
-promise that its foreground colors are legible against its own
-background, so touching only the foreground is legible everywhere by
-construction — which is why grep's colors have survived every terminal
-anyone has ever used. Painting a background breaks the promise: black on
-yellow reads on a dark terminal and disappears on a light one, where
-yellow is a dark olive.
+Color, but never a background color — which is why grep's colors have
+survived every terminal anyone has ever used. Painting a background is
+the part that cannot be made to work: black on yellow reads on a dark
+terminal and disappears on a light one, where yellow is a dark olive.
 
-So a search match is bold red and a matching parenthesis is bold cyan,
-while the region and the mode line are reverse video and trailing
-whitespace is underlined — a space has no glyph to color, and reverse
-video would turn a line holding nothing but its old indentation into a
-bar across the screen. The terminal's own background is never touched.
+Foreground alone is not quite enough either: half of the sixteen colors
+are light inks and half are dark ones, and not one of them is legible
+against both backgrounds. So the terminal is asked which it has, and the
+palette follows the answer. See [the colours are asked for, not
+configured](#the-colours-are-asked-for-not-configured).
+
+So a search match is bold red, a matching parenthesis is bold cyan or
+bold blue depending on that answer, and the region and the mode line are
+reverse video while trailing whitespace is underlined — a space has no
+glyph to color, and reverse video would turn a line holding nothing but
+its old indentation into a bar across the screen. The terminal's own
+background is never touched.
 
 ## Keys
 
@@ -490,15 +494,13 @@ is the longest thing anybody here writes by hand — long enough that
 finding a heading, or seeing where a code fence ends, is worth more than
 it would be in a language a compiler is going to check anyway.
 
-Headings are magenta, code is green — inline and fenced alike — and both
-halves of a link are cyan, with the URL underlined so that you can see
-where the words stop and the address starts. Bullets, the `>` of a quote
-and `---` are markers: only the marker is coloured, and the text after it
-is left as ordinary text. `**strong**` is bold and `*emphasis*` is
-italic, or underlined on a terminal with no italics to give.
-
-Foreground colours only, the rule the rest of the display already
-follows: nothing here paints a background of its own.
+Headings are magenta. Both halves of a link take one colour with the URL
+underlined, so that you can see where the words stop and the address
+starts. `**strong**` is bold and `*emphasis*` is italic, or underlined on
+a terminal with no italics to give. Bullets, the `>` of a quote and `---`
+are markers: only the marker is coloured, and the text after it is left
+as ordinary text. What colour the rest of it is depends on the terminal,
+which is asked — see below.
 
 Nothing inside a fence means anything, which is what a fence is for — a
 `console` block full of globs and asterisks comes out as the shell wrote
@@ -514,6 +516,45 @@ thing in the file that needs more than one line to understand.
 It is not a major mode, and there is nothing to turn on or off. `M-q`
 still fills a paragraph the way it does everywhere else, and every key
 does what it does in any other buffer.
+
+### The colours are asked for, not configured
+
+Only foreground colours are ever set, never a background. Black on
+yellow reads on a dark terminal and disappears on a light one, where
+yellow is a dark olive, and that is true of any background you might
+choose.
+
+That much is the usual advice, and on its own it is not enough. Half of
+the sixteen colours are light inks and half are dark ones, and not one
+of them is legible against both. Measured against Terminal.app's own
+palette, green is 6.5:1 against its black and 3.3:1 against its white;
+blue is 12.8:1 on that white and 1.6:1 on that black. Nothing in the
+sixteen clears 4.5:1 both ways, so there is no palette that is simply
+correct.
+
+So the terminal is asked. `ESC ] 11 ; ?` is the question, and what it
+asks is *what colour are you painted*. It goes out before curses starts,
+so that the answer cannot arrive as though somebody had typed it.
+`ESC [ c` follows immediately: every terminal since the VT100 answers
+that one, so its answer arriving is what says the first answer is not
+coming rather than merely late. Without it, the only way to give up
+would be a timeout long enough to be a stutter at startup.
+
+If anything is already waiting on the keyboard when that moment comes —
+somebody who started typing while Python was still starting — nothing is
+asked at all. Reading past a keystroke to find out a colour would throw
+the keystroke away, because a terminal cannot be handed input back.
+
+A dark terminal gets green code, cyan links and yellow markers. A light
+one gets blue code and magenta links, and the markers give up their
+colour rather than take yellow at 3:1 — where a bullet sits is already
+most of what says it is one. A terminal that will not answer is taken to
+be dark, which is what a terminal has usually been.
+
+This is not a setting, and that is the point of doing it this way. What
+colour the terminal is painted is a fact about the terminal; a setting
+would be that fact written down a second time, somewhere it can go out
+of date.
 
 ## Autosave, and the one case it stops
 

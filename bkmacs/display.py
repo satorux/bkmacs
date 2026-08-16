@@ -31,6 +31,14 @@ from .layout import (Expanded, char_width, display_width, expand, pad,
 #: is what strong emphasis already is.
 ITALIC = getattr(curses, "A_ITALIC", curses.A_UNDERLINE)
 
+#: The foreground colours, in the order their pairs are allocated.  Both
+#: palettes are drawn from these six; which of them is used is the whole of the
+#: difference between a light terminal and a dark one.  ``color_pair`` cannot
+#: be called until curses has started, so the numbers are turned into
+#: attributes in :meth:`Display._palette` rather than here.
+COLORS = (curses.COLOR_RED, curses.COLOR_CYAN, curses.COLOR_MAGENTA,
+          curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_BLUE)
+
 #: A row of the buffer and which of its wrapped segments is meant.
 ScreenPos = tuple[int, int]
 
@@ -132,13 +140,21 @@ class Window:
 class Display:
     """Everything that puts characters on the terminal."""
 
-    #: Never a background color, only a foreground one.  A terminal theme is
-    #: exactly a promise that its sixteen foreground colors are legible
-    #: against its own background, so touching only the foreground is legible
-    #: everywhere by construction.  Painting a background of our own breaks
-    #: that promise: black on yellow reads on a dark terminal and vanishes on
-    #: a light one, where yellow is a dark olive.  This is also why grep's
-    #: colors have survived every terminal anyone has ever used.
+    #: Never a background color, only a foreground one.  Painting a background
+    #: of our own is what cannot be made to work: black on yellow reads on a
+    #: dark terminal and vanishes on a light one, where yellow is a dark olive.
+    #: This is also why grep's colors have survived every terminal anyone has
+    #: ever used.
+    #:
+    #: Foreground alone is not enough on its own, though, which is the thing
+    #: it is tempting to assume.  Measured against Terminal.app's own palette,
+    #: green is 6.5:1 on black and 3.3:1 on white; blue is 12.8:1 on white and
+    #: 1.6:1 on black.  No color in the sixteen clears 4.5:1 on both, because
+    #: half of them are light inks and half are dark ones.  So the terminal is
+    #: asked which it has -- see :func:`bkmacs.term.background_is_light` -- and
+    #: the light half of the palette is used against dark backgrounds and the
+    #: dark half against light ones.  Dark is assumed when it will not say,
+    #: since that is what a terminal has usually been.
     #:
     #: Trailing whitespace is underlined rather than reversed or colored.  A
     #: space has no glyph to color, bold does not show on one either, and
@@ -162,7 +178,7 @@ class Display:
         markdown.EMPHASIS: ITALIC,
     }
 
-    def __init__(self, stdscr) -> None:
+    def __init__(self, stdscr, light: bool = False) -> None:
         self.stdscr = stdscr
         self._size = self.size()
         # curses.wrapper has already called start_color, which leaves color
@@ -174,23 +190,51 @@ class Display:
         # attribute-only values above stand as the fallback.
         try:
             curses.use_default_colors()
-            curses.init_pair(1, curses.COLOR_RED, -1)
-            curses.init_pair(2, curses.COLOR_CYAN, -1)
-            curses.init_pair(3, curses.COLOR_MAGENTA, -1)
-            curses.init_pair(4, curses.COLOR_GREEN, -1)
-            curses.init_pair(5, curses.COLOR_YELLOW, -1)
-            self.MATCH = curses.color_pair(1) | curses.A_BOLD
-            self.PAREN = curses.color_pair(2) | curses.A_BOLD
-            self.MARKDOWN = dict(self.MARKDOWN, **{
-                markdown.HEADING: curses.color_pair(3) | curses.A_BOLD,
-                markdown.CODE: curses.color_pair(4),
-                markdown.FENCE: curses.color_pair(4) | curses.A_BOLD,
-                markdown.LINK: curses.color_pair(2),
-                markdown.URL: curses.color_pair(2) | curses.A_UNDERLINE,
-                markdown.MARKER: curses.color_pair(5),
-            })
+            for pair, color in enumerate(COLORS, start=1):
+                curses.init_pair(pair, color, -1)
+            self._palette(light)
         except curses.error:
             pass
+
+    def _palette(self, light: bool) -> None:
+        """The colors, chosen for the background the terminal turned out to have.
+
+        Contrast ratios below are against Terminal.app's palette on its own
+        white and its own black, which is the pair this was checked on.
+
+        A light background is the awkward one, because the colors that survive
+        it are the three dark inks -- blue, magenta, red -- and there are more
+        things here that want a color than there are of them.  Two give way.
+        Bullets and quote markers lose their color rather than take yellow at
+        3:1, since a ``-`` at the start of a line is already where a bullet
+        goes and bold is enough to finish the job; and links share magenta with
+        headings, which are whole lines where a link is a few words inside one.
+        """
+        red, cyan, magenta, green, yellow, blue = (
+            curses.color_pair(pair) for pair in range(1, len(COLORS) + 1))
+        bold, underline = curses.A_BOLD, curses.A_UNDERLINE
+        if light:
+            self.MATCH = red | bold  # 4.8:1, and grep's own colour.
+            self.PAREN = blue | bold  # 8.6:1, where cyan would be 1.6:1.
+            self.MARKDOWN = dict(self.MARKDOWN, **{
+                markdown.HEADING: magenta | bold,  # 3.8:1
+                markdown.CODE: blue,  # 12.8:1, where green would be 3.3:1.
+                markdown.FENCE: blue | bold,
+                markdown.LINK: magenta,  # 5.9:1
+                markdown.URL: magenta | underline,
+                markdown.MARKER: bold,
+            })
+        else:
+            self.MATCH = red | bold  # 4.3:1
+            self.PAREN = cyan | bold  # 13.3:1
+            self.MARKDOWN = dict(self.MARKDOWN, **{
+                markdown.HEADING: magenta | bold,  # 5.5:1
+                markdown.CODE: green,  # 6.5:1
+                markdown.FENCE: green | bold,
+                markdown.LINK: cyan,  # 7.1:1
+                markdown.URL: cyan | underline,
+                markdown.MARKER: yellow,  # 6.9:1
+            })
 
     # -- geometry --------------------------------------------------------
 

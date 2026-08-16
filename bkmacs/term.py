@@ -19,8 +19,11 @@ from __future__ import annotations
 import curses
 import locale
 import os
+import re
+import select
 import signal
 import termios
+import time
 from typing import Optional
 
 #: How long to wait after ESC before deciding it was ESC and not Meta.  Long
@@ -184,6 +187,118 @@ class Terminal:
         self._configure()
         self.stdscr.redrawwin()
         self.stdscr.refresh()
+
+
+#: How long to allow for the two answers below.  Local terminals reply in
+#: under a millisecond; this is sized for a link with a person's patience at
+#: the far end of it, and it is paid once, at startup, and only when the
+#: terminal never answers at all.
+BACKGROUND_TIMEOUT = 0.2
+
+#: ``ESC ] 11 ; ?`` asks the terminal what colour it is painted, and ``ESC [ c``
+#: asks what kind of terminal it is.  The second question is the useful one:
+#: every terminal since the VT100 answers it, so its answer arriving is what
+#: says the first answer is not coming, rather than merely late.  Without that,
+#: the only way to give up is a timeout long enough to be a stutter at startup
+#: -- and a reply arriving after we stopped listening would be typed into the
+#: buffer as though the user had done it.
+_QUERY = b"\x1b]11;?\x07\x1b[c"
+_DEVICE_ATTRIBUTES = re.compile(br"\x1b\[\?[0-9;]*c")
+_BACKGROUND = re.compile(
+    br"\x1b\]11;rgba?:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)")
+
+
+def background_is_light() -> Optional[bool]:
+    """Is the terminal painted a light colour?  ``None`` if it will not say.
+
+    This editor has no configuration file, and this is the reason it does not
+    need one to get its colours right: what background the terminal has is a
+    fact about the terminal, and the terminal can be asked.  A setting would
+    be the same fact written down again somewhere it can go out of date.
+
+    Asked before curses starts, so that the reply cannot be mistaken for
+    somebody typing, and with the terminal put back exactly as it was found.
+    """
+    if not (os.isatty(0) and os.isatty(1)):
+        return None
+    try:
+        saved = termios.tcgetattr(0)
+    except termios.error:
+        return None
+    try:
+        raw = list(saved)
+        raw[3] &= ~(termios.ECHO | termios.ICANON)  # Do not echo the answer.
+        raw[6] = list(raw[6])
+        raw[6][termios.VMIN] = 0
+        raw[6][termios.VTIME] = 0
+        termios.tcsetattr(0, termios.TCSANOW, raw)
+        if select.select([0], [], [], 0)[0]:
+            # Somebody typed ahead while Python was starting, and those bytes
+            # are waiting in front of any answer.  Reading past them would
+            # throw them away, since a terminal cannot be handed input back.
+            # A keystroke is worth more than knowing which palette to use.
+            return None
+        os.write(1, _QUERY)
+        reply = _answer()
+    except (termios.error, OSError):
+        return None
+    finally:
+        try:
+            termios.tcsetattr(0, termios.TCSANOW, saved)
+        except termios.error:
+            pass
+    return _lightness(reply)
+
+
+def _answer() -> bytes:
+    """Read until the terminal has answered the second question, or given up.
+
+    One byte at a time, and stopping on the byte that completes the answer.
+    Reading in bulk would be fewer system calls and would also swallow
+    anything typed ahead: somebody who starts typing before the editor has
+    finished starting up would have it read here and thrown away, since a
+    terminal cannot be handed input back.  Thirty single-byte reads at
+    startup is a much better price than a lost keystroke.
+    """
+    deadline = time.monotonic() + BACKGROUND_TIMEOUT
+    data = b""
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return data
+        try:
+            ready, _, _ = select.select([0], [], [], remaining)
+            if not ready:
+                return data
+            byte = os.read(0, 1)
+        except (OSError, ValueError):
+            return data
+        if not byte:
+            return data
+        data += byte
+        if _DEVICE_ATTRIBUTES.search(data):
+            return data
+
+
+def _lightness(reply: bytes) -> Optional[bool]:
+    """Whether a colour the terminal named is nearer white than black.
+
+    The components come back as one to four hex digits each -- ``rgb:f/0/0``
+    and ``rgb:ffff/0000/0000`` are the same red -- so each is divided by what
+    that many digits can hold rather than by a fixed 255.  What is compared is
+    perceived brightness, not the average of the three: a terminal painted pure
+    blue is dark and a terminal painted pure green is not, and averaging says
+    they are the same.
+    """
+    found = _BACKGROUND.search(reply)
+    if not found:
+        return None
+    values = []
+    for digits in found.groups():
+        text = digits.decode("ascii")
+        values.append(int(text, 16) / float(16 ** len(text) - 1))
+    red, green, blue = values
+    return 0.299 * red + 0.587 * green + 0.114 * blue > 0.5
 
 
 def setup_locale() -> bool:

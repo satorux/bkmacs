@@ -266,9 +266,22 @@ SET_MARK = "\x00"  # C-@, which is what C-SPC actually sends.
 class Session:
     """A running bkmacs, and a keyboard to type at it with."""
 
+    #: What the editor sends at startup to find out what colour the terminal
+    #: is painted, and what it sends straight after to find out whether the
+    #: first question is going to be answered at all.
+    BACKGROUND_QUERY = b"\x1b]11;?"
+    ATTRIBUTES_QUERY = b"\x1b[c"
+
     def __init__(self, *paths: str, rows: int = 24, columns: int = 80,
                  history: str = "", home: str = "",
-                 entry: "list[str] | None" = None, cwd: str = "") -> None:
+                 entry: "list[str] | None" = None, cwd: str = "",
+                 background: str = "", early: str = "") -> None:
+        #: The background to claim when asked, as the three hex components of
+        #: an ``ESC ] 11`` reply.  Empty is a terminal that does not answer the
+        #: question, which is the common one and so the default here: every
+        #: other test then runs against the palette a plain terminal gets.
+        self.background = background
+        self.answered: set = set()
         self.display = Screen(rows, columns)
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ,
@@ -286,6 +299,10 @@ class Session:
             cwd=cwd or ROOT, env=environment, start_new_session=False)
         os.close(slave)
         self.output = b""
+        # Typed before the editor has finished starting, which is the case
+        # the questions it asks at startup have to be careful of.
+        if early:
+            os.write(self.master, early.encode("utf-8"))
         # Started, rather than started and a fixed wait later: what says the
         # editor is up is the mode line, and it is there as soon as the first
         # frame is drawn.  Python's own startup is most of this.
@@ -327,6 +344,7 @@ class Session:
             if chunk:
                 self.output += chunk
                 self.display.feed(chunk.decode("utf-8", "replace"))
+                self.answer_queries()
                 last = time.monotonic()
             else:
                 time.sleep(0.01)
@@ -334,6 +352,24 @@ class Session:
                 return
             if quiet and last is not None and time.monotonic() - last > quiet:
                 return
+
+    def answer_queries(self) -> None:
+        """Be the terminal the editor is asking questions of.
+
+        The device-attributes question is always answered, and answered even
+        when the background one is not: that is how a real terminal without
+        the colour question behaves, and answering it is what keeps every
+        session in this file from waiting out the editor's timeout at startup.
+        """
+        if (self.background and self.BACKGROUND_QUERY in self.output
+                and "background" not in self.answered):
+            self.answered.add("background")
+            os.write(self.master,
+                     b"\x1b]11;rgb:" + self.background.encode() + b"\x07")
+        if (self.ATTRIBUTES_QUERY in self.output
+                and "attributes" not in self.answered):
+            self.answered.add("attributes")
+            os.write(self.master, b"\x1b[?1;2c")
 
     def screen(self) -> str:
         return self.display.text()
@@ -1434,6 +1470,51 @@ class SessionTest(unittest.TestCase):
         self.assertRow(session, 0, "## plain")
         self.assertIn("fg5", session.display.styles_of(0, "## plain"))
         self.assertModeLine(session, "Markdown")
+
+    def test_a_light_terminal_gets_the_dark_half_of_the_palette(self):
+        path = self.file("README.md", self.MARKDOWN)
+        session = self.start(path, background="ffff/ffff/ffff")
+        styles = session.display.styles_of
+        # Blue for code where a dark terminal gets green, and magenta for
+        # links where it gets cyan: on white those two are 3:1 and worse.
+        self.assertIn("fg4", styles(2, "`code`"))
+        self.assertNotIn("fg2", styles(2, "`code`"))
+        self.assertIn("fg5", styles(2, "[link]"))
+        self.assertNotIn("fg6", styles(2, "[link]"))
+        # The bullet gives up its colour rather than take yellow at 3:1;
+        # where a bullet goes is already most of what says it is one.
+        self.assertEqual(styles(8, "-"), frozenset({"bold"}))
+        self.assertEqual(styles(8, "an item"), frozenset())
+
+    def test_a_dark_terminal_keeps_the_light_half(self):
+        path = self.file("README.md", self.MARKDOWN)
+        session = self.start(path, background="1c1c/1c1c/1c1c")
+        self.assertIn("fg2", session.display.styles_of(2, "`code`"))
+        self.assertIn("fg6", session.display.styles_of(2, "[link]"))
+        self.assertIn("fg3", session.display.styles_of(8, "-"))
+
+    def test_a_terminal_that_will_not_say_is_taken_to_be_dark(self):
+        path = self.file("README.md", self.MARKDOWN)
+        session = self.start(path)  # Answers the second question only.
+        self.assertIn(Session.BACKGROUND_QUERY, session.output)
+        self.assertIn("fg2", session.display.styles_of(2, "`code`"))
+
+    def test_typing_ahead_of_startup_survives_the_colour_question(self):
+        path = self.file("t.md", "`code` here\n")
+        session = self.start(path, background="ffff/ffff/ffff", early="typed ")
+        # The keystrokes arrive first and are still in front of any answer,
+        # so the question is not asked at all rather than asked and its answer
+        # read over the top of them -- a terminal cannot be handed input back.
+        self.assertRow(session, 0, "typed `code` here")
+        self.assertNotIn(Session.BACKGROUND_QUERY, session.output)
+        self.assertIn("fg2", session.display.styles_of(0, "`code`"))
+
+    def test_the_background_is_weighed_rather_than_averaged(self):
+        # A terminal painted pure green is a light one, and averaging the
+        # three components would have made it a third as bright as it looks.
+        path = self.file("README.md", self.MARKDOWN)
+        session = self.start(path, background="0000/ffff/0000")
+        self.assertIn("fg4", session.display.styles_of(2, "`code`"))
 
     def test_a_search_match_wins_over_the_markdown_colour(self):
         path = self.file("README.md", "# Title here\n\nplain\n")

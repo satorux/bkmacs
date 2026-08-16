@@ -256,9 +256,10 @@ class Editor:
         "C-u": "upcase-region", "C-l": "downcase-region",
     }
 
-    def __init__(self, stdscr, paths: list[str], warning: str = "") -> None:
+    def __init__(self, stdscr, paths: list[str], warning: str = "",
+                 light: bool = False) -> None:
         self.term = Terminal(stdscr)
-        self.display = Display(stdscr)
+        self.display = Display(stdscr, light)
         self.kill_ring = KillRing()
         #: The last killed rectangle, which is a ring of one in Emacs too.
         self.killed_rectangle: list[str] = []
