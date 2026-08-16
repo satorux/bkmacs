@@ -31,6 +31,12 @@ from bkmacs.layout import char_width  # noqa: E402
 
 CSI_PARAMETERS = "0123456789;?<=>!"
 
+#: How long the terminal has to stay silent before the editor counts as having
+#: finished drawing.  A redraw arrives in one write, so this only has to be
+#: longer than the gap between two of them and shorter than the waits it is
+#: saving -- and the whole suite is otherwise four fifths sleep.
+QUIET = 0.05
+
 BLANK = (" ", frozenset())
 
 #: SGR codes worth remembering.  Attributes matter as much as characters: a
@@ -279,15 +285,38 @@ class Session:
             cwd=cwd or ROOT, env=environment, start_new_session=False)
         os.close(slave)
         self.output = b""
-        self.settle(0.6)
+        # Started, rather than started and a fixed wait later: what says the
+        # editor is up is the mode line, and it is there as soon as the first
+        # frame is drawn.  Python's own startup is most of this.
+        self.settle(5.0, quiet=QUIET, until=lambda: self.mode_line().strip())
 
     def send(self, keys: str) -> None:
         os.write(self.master, keys.encode("utf-8"))
-        self.settle(0.15)
+        self.settle(0.15, quiet=QUIET)
 
-    def settle(self, seconds: float) -> None:
-        """Let the editor catch up, draining what it drew."""
+    def settle(self, seconds: float, quiet: float = 0,
+               until=None) -> None:
+        """Let the editor catch up, draining what it drew.
+
+        ``seconds`` is how long to allow, and by default it is also how long
+        this takes: a wait with nothing to see is still a real wait, since
+        the autosave writes a file half a second after the typing stops and
+        draws nothing at all while it does it.
+
+        The two ways of finishing early are for the waits that do have
+        something to see.  ``until`` is a question to ask after each read --
+        the screen having been drawn at all, say -- and ``quiet`` says to
+        stop once that many seconds have gone by with nothing arriving,
+        which is what a keystroke's worth of redrawing looks like when it is
+        over.
+
+        Quiet only counts after something has arrived.  The terminal is
+        silent in the moment after a keystroke as well as in the moment after
+        the redraw it causes, and the two are told apart by which side of the
+        drawing they are on, not by how they sound.
+        """
         deadline = time.monotonic() + seconds
+        last = None
         while time.monotonic() < deadline:
             os.set_blocking(self.master, False)
             try:
@@ -297,8 +326,13 @@ class Session:
             if chunk:
                 self.output += chunk
                 self.display.feed(chunk.decode("utf-8", "replace"))
+                last = time.monotonic()
             else:
-                time.sleep(0.02)
+                time.sleep(0.01)
+            if until is not None and until():
+                return
+            if quiet and last is not None and time.monotonic() - last > quiet:
+                return
 
     def screen(self) -> str:
         return self.display.text()
@@ -340,25 +374,66 @@ class SessionTest(unittest.TestCase):
         with open(path) as handle:
             return handle.read()
 
+    def assertEcho(self, session, text: str, timeout: float = 3.0) -> None:
+        """Wait for the echo area to say ``text``, and fail with it if it
+        never does."""
+        session.settle(timeout, until=lambda: text in session.echo())
+        self.assertIn(text, session.echo())
+
+    def assertScreen(self, session, text: str, timeout: float = 3.0) -> None:
+        """The same, of the screen as a whole."""
+        session.settle(timeout, until=lambda: text in session.screen())
+        self.assertIn(text, session.screen())
+
+    def assertModeLine(self, session, text: str, timeout: float = 3.0) -> None:
+        """The same, of the mode line."""
+        session.settle(timeout, until=lambda: text in session.mode_line())
+        self.assertIn(text, session.mode_line())
+
+    def assertRow(self, session, row: int, text: str,
+                  timeout: float = 3.0) -> None:
+        """The same, of one row of it -- which is how the window below says
+        what it is showing, since its own mode line is a row like any other."""
+        session.settle(timeout,
+                       until=lambda: text in session.display.row(row))
+        self.assertIn(text, session.display.row(row))
+
+    def assertSaved(self, path: str, text: str, timeout: float = 3.0) -> None:
+        """Wait for the file to hold ``text``, and fail with it if it never
+        does.
+
+        The autosave draws nothing.  It writes the file half a second after
+        the typing stops, and the only way to watch that happen is to look at
+        the file -- so this looks, rather than sleeping past the moment and
+        hoping.  Which is the difference between a suite that waits as long
+        as the editor takes and one that waits as long as it was told to.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                found = self.contents(path)
+            except OSError:
+                found = ""
+            if found == text or time.monotonic() > deadline:
+                return self.assertEqual(found, text)
+            time.sleep(0.02)
+
     # -- the tests -------------------------------------------------------
 
     def test_types_and_autosaves_to_the_file_itself(self):
         path = self.file("a.txt", "hello\n")
         session = self.start(path)
         session.send(CTRL["e"] + " world")
-        session.settle(1.0)  # Longer than the half-second idle.
-        self.assertEqual(self.contents(path), "hello world\n")
+        self.assertSaved(path, "hello world\n")
 
     def test_control_s_is_a_search_and_not_flow_control(self):
         path = self.file("b.txt", "alpha\nbeta\ngamma\n")
         session = self.start(path)
         session.send(CTRL["s"] + "gam")
-        session.settle(0.3)
-        self.assertIn("I-search: gam", session.echo())
+        self.assertEcho(session, "I-search: gam")
         # Emacs leaves point at the end of the match, so C-k takes the rest.
         session.send(RET + CTRL["k"])
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "alpha\nbeta\ngam\n")
+        self.assertSaved(path, "alpha\nbeta\ngam\n")
 
     def highlighted(self, session, row: int) -> str:
         """The characters drawn in reverse video on one row of the screen."""
@@ -375,8 +450,7 @@ class SessionTest(unittest.TestCase):
         session.send(ESC + ">")  # M->, since backwards from the top finds
         session.settle(0.3)      # nothing at all.
         session.send(CTRL["r"] + "beta")
-        session.settle(0.4)
-        self.assertIn("I-search backward: beta", session.echo())
+        self.assertEcho(session, "I-search backward: beta")
         self.assertEqual(self.highlighted(session, 2), "beta")
         # And on again to the one before it.
         session.send(CTRL["r"])
@@ -384,16 +458,13 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(self.highlighted(session, 0), "beta")
         # Point is left at the front of the match, which is where C-d bites.
         session.send(RET + CTRL["d"])
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "eta one\nalpha\nbeta two\n")
+        self.assertSaved(path, "eta one\nalpha\nbeta two\n")
 
     def test_a_second_control_s_repeats_the_last_search(self):
         path = self.file("e.txt", "alpha\nbeta\ngamma\nbeta\n")
         session = self.start(path)
         session.send(CTRL["s"] + "beta" + RET)
-        session.settle(0.4)
         session.send(ESC + "<")  # Back to the top, with nothing typed.
-        session.settle(0.3)
         session.send(CTRL["s"] + CTRL["s"])
         session.settle(0.5)
         # The recalled search is in the minibuffer as though it were typed,
@@ -402,27 +473,22 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(self.highlighted(session, 1), "beta")
         # DEL takes the recall back off again, like any other keystroke.
         session.send(DEL)
-        session.settle(0.3)
-        self.assertIn("I-search:", session.echo())
+        self.assertEcho(session, "I-search:")
         self.assertNotIn("beta", session.echo())
 
     def test_a_second_control_r_repeats_it_backwards(self):
         path = self.file("f.txt", "alpha\nbeta\ngamma\nbeta\n")
         session = self.start(path)
         session.send(CTRL["s"] + "beta" + RET)
-        session.settle(0.4)
         session.send(ESC + ">")
-        session.settle(0.3)
         session.send(CTRL["r"] + CTRL["r"])
-        session.settle(0.5)
-        self.assertIn("I-search backward: beta", session.echo())
+        self.assertEcho(session, "I-search backward: beta")
         self.assertEqual(self.highlighted(session, 3), "beta")
 
     def test_find_alternate_file_reads_the_file_again(self):
         path = self.file("g.txt", "one\ntwo\nthree\n")
         session = self.start(path)
         session.send(CTRL["n"] + CTRL["n"])
-        session.settle(0.3)
         session.send(CTRL["x"] + CTRL["v"])
         session.settle(0.4)
         # The prompt starts out holding the name of the file already here,
@@ -442,7 +508,6 @@ class SessionTest(unittest.TestCase):
         self.file("i.txt", "bbb\n")
         session = self.start(path)
         session.send(CTRL["x"] + CTRL["v"])
-        session.settle(0.4)
         session.send(DEL * len("h.txt") + "i.txt" + RET)
         session.settle(0.5)
         self.assertEqual(session.display.row(0), "bbb")
@@ -457,13 +522,11 @@ class SessionTest(unittest.TestCase):
         path = self.file("d.txt", "one\n吾輩は猫である\n")
         session = self.start(path)
         session.send(CTRL["s"] + "neko")  # No M-m: migemo is where it starts.
-        session.settle(0.3)
-        self.assertIn("I-search: neko", session.echo())
+        self.assertEcho(session, "I-search: neko")
         # Point is left at the end of what the pattern matched, which is the
         # one character 猫 and not the four letters that were typed.
         session.send(RET + CTRL["k"])
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "one\n吾輩は猫\n")
+        self.assertSaved(path, "one\n吾輩は猫\n")
 
     def test_migemo_can_be_turned_off_and_stays_off(self):
         path = self.file("e.txt", "吾輩は猫である\n")
@@ -473,13 +536,11 @@ class SessionTest(unittest.TestCase):
         # Off, so romaji in a file that has none of it finds nothing.
         self.assertIn("Failing I-search [literal]: neko", session.echo())
         session.send(ESC + "m")
-        session.settle(0.3)
-        self.assertIn("I-search: neko", session.echo())
+        self.assertEcho(session, "I-search: neko")
         self.assertNotIn("Failing", session.echo())
         # Where the search is left is where the next one starts.
         session.send(ESC + "m" + RET + CTRL["s"])
-        session.settle(0.3)
-        self.assertIn("I-search [literal]:", session.echo())
+        self.assertEcho(session, "I-search [literal]:")
 
     def test_query_replace(self):
         path = self.file("c.txt", "one two one two\n")
@@ -487,12 +548,10 @@ class SessionTest(unittest.TestCase):
         session.send(ESC + "%")  # M-%
         session.send("one" + RET)
         session.send("ONE" + RET)
-        session.settle(0.3)
-        self.assertIn("Query replacing one with ONE", session.echo())
+        self.assertEcho(session, "Query replacing one with ONE")
         session.send("y")
         session.send("!")
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "ONE two ONE two\n")
+        self.assertSaved(path, "ONE two ONE two\n")
 
     def test_transpose_chars(self):
         path = self.file("t.txt", "teh\nx\ny\n")
@@ -501,8 +560,7 @@ class SessionTest(unittest.TestCase):
         session.send(CTRL["t"])
         session.send(CTRL["n"] + CTRL["a"])  # Start of "x": swaps it with the
         session.send(CTRL["t"])  # newline, pulling it up and leaving a blank.
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "thex\n\ny\n")
+        self.assertSaved(path, "thex\n\ny\n")
 
     def test_region_kill_and_yank(self):
         path = self.file("d.txt", "abcdef\n")
@@ -512,8 +570,7 @@ class SessionTest(unittest.TestCase):
         session.send(CTRL["w"])  # Kill it.
         session.send(CTRL["e"])
         session.send(CTRL["y"])  # Yank it back at the end.
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "defabc\n")
+        self.assertSaved(path, "defabc\n")
 
     def test_kill_and_yank_rectangle(self):
         path = self.file("r.txt", "abcdef\nabcdef\nabcdef\n")
@@ -525,12 +582,10 @@ class SessionTest(unittest.TestCase):
         session.settle(0.2)
         self.assertIn("C-x r-", session.echo())  # A prefix under a prefix.
         session.send("k")
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "aef\naef\naef\n")
+        self.assertSaved(path, "aef\naef\naef\n")
         session.send(CTRL["e"])
         session.send(CTRL["x"] + "ry")
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "aefbcd\naefbcd\naefbcd\n")
+        self.assertSaved(path, "aefbcd\naefbcd\naefbcd\n")
 
     def test_string_rectangle_pads_a_line_too_short_to_reach_it(self):
         path = self.file("s.txt", "aaaa\nb\ncccc\n")
@@ -540,25 +595,21 @@ class SessionTest(unittest.TestCase):
         session.send(CTRL["n"] * 2 + CTRL["f"])  # One column wide, three deep.
         session.send(ESC + "x" + "string-rectangle" + RET)
         session.send("X" + RET)
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "aaXa\nb X\nccXc\n")
+        self.assertSaved(path, "aaXa\nb X\nccXc\n")
 
     def test_undo_by_control_backslash(self):
         path = self.file("e.txt", "keep\n")
         session = self.start(path)
         session.send(CTRL["e"] + "XYZ")
-        session.settle(0.8)
-        self.assertEqual(self.contents(path), "keepXYZ\n")
+        self.assertSaved(path, "keepXYZ\n")
         session.send(UNDO)
-        session.settle(0.8)
-        self.assertEqual(self.contents(path), "keep\n")
+        self.assertSaved(path, "keep\n")
 
     def test_backspace_and_control_h_both_delete_backwards(self):
         path = self.file("f.txt", "abcdef\n")
         session = self.start(path)
         session.send(CTRL["e"] + DEL + CTRL["h"])
-        session.settle(0.8)
-        self.assertEqual(self.contents(path), "abcd\n")
+        self.assertSaved(path, "abcd\n")
 
     def test_two_files_and_switching_between_them(self):
         first = self.file("one.txt", "first\n")
@@ -567,16 +618,14 @@ class SessionTest(unittest.TestCase):
         session.send(CTRL["e"] + "!")
         session.send(CTRL["x"] + "b" + "two.txt" + RET)
         session.send(CTRL["e"] + "?")
-        session.settle(1.0)
-        self.assertEqual(self.contents(first), "first!\n")
+        self.assertSaved(first, "first!\n")
         self.assertEqual(self.contents(second), "second?\n")
 
     def test_japanese_is_typed_and_measured(self):
         path = self.file("j.txt", "")
         session = self.start(path)
         session.send("吾輩は猫である")
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "吾輩は猫である")
+        self.assertSaved(path, "吾輩は猫である")
         self.assertEqual(session.display.row(0), "吾輩は猫である")
         self.assertIn("(1,14)", session.mode_line())  # Seven wide ones.
 
@@ -584,15 +633,12 @@ class SessionTest(unittest.TestCase):
         path = self.file("m.txt", "one\ntwo\n")
         session = self.start(path)
         session.send(CTRL["n"] + CTRL["e"])
-        session.settle(0.3)
-        self.assertIn("m.txt", session.mode_line())
+        self.assertModeLine(session, "m.txt")
         self.assertIn("(2,3)", session.mode_line())
         self.assertIn("-UUU:---", session.mode_line())
         session.send("!")
-        session.settle(0.2)
-        self.assertIn("-UUU:-**", session.mode_line())
-        session.settle(0.8)  # The autosave clears the modified flag.
-        self.assertIn("-UUU:---", session.mode_line())
+        self.assertModeLine(session, "-UUU:-**")
+        self.assertModeLine(session, "-UUU:---")
 
     def test_long_lines_wrap_with_a_continuation_marker(self):
         path = self.file("w.txt", "x" * 100 + "\n")
@@ -608,8 +654,7 @@ class SessionTest(unittest.TestCase):
         with open(path, "w") as handle:
             handle.write("theirs\n")
         session.send(CTRL["e"] + "!")
-        session.settle(1.2)
-        self.assertIn("[disk changed]", session.mode_line())
+        self.assertModeLine(session, "[disk changed]")
 
     def test_suspend_stops_the_process_and_fg_brings_it_back(self):
         path = self.file("z.txt", "text\n")
@@ -622,8 +667,7 @@ class SessionTest(unittest.TestCase):
         time.sleep(0.4)
         self.assertNotEqual(self.process_state(session.process.pid), "T")
         session.send(CTRL["e"] + "!")
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "text!\n")
+        self.assertSaved(path, "text!\n")
 
     def test_external_change_stops_the_autosave_instead_of_clobbering(self):
         path = self.file("x.txt", "mine\n")
@@ -632,9 +676,11 @@ class SessionTest(unittest.TestCase):
         with open(path, "w") as handle:
             handle.write("theirs\n")
         session.send(CTRL["e"] + "!")
-        session.settle(1.2)
-        self.assertEqual(self.contents(path), "theirs\n")
-        self.assertIn("changed on disk", session.screen())
+        # The refusal is what to wait for: the file is already what it should
+        # stay, so watching it says nothing about whether the autosave has
+        # run yet and decided to leave it alone.
+        self.assertScreen(session, "changed on disk")
+        self.assertSaved(path, "theirs\n")
 
     def test_grep_finds_hits_and_ret_jumps_to_one(self):
         self.file("one.py", "import os\nprint(os.getcwd())\n")
@@ -658,8 +704,7 @@ class SessionTest(unittest.TestCase):
         session.send(CTRL["x"] + "o")  # Into the results.
         session.send(CTRL["n"])  # Down to the second hit.
         session.send(RET)
-        session.settle(0.3)
-        self.assertIn("two.py", session.display.row(11))
+        self.assertRow(session, 11, "two.py")
         self.assertIn("*grep*", session.display.row(22))
 
     def test_grep_globs_reach_into_subdirectories(self):
@@ -699,8 +744,7 @@ class SessionTest(unittest.TestCase):
         # that what the user types is exactly the glob that gets used.
         self.assertIn("default *", session.echo())
         session.send(RET)
-        session.settle(0.5)
-        self.assertIn("a.txt:1:", session.screen())
+        self.assertScreen(session, "a.txt:1:")
         self.assertIn("b.py:1:", session.screen())
 
     def test_occur_lists_matching_lines_of_this_buffer(self):
@@ -729,32 +773,26 @@ class SessionTest(unittest.TestCase):
 
         # C-x ` walks them in the source window, first one first.
         session.send(CTRL["x"] + "`")
-        session.settle(0.3)
-        self.assertIn("(1,0)", session.display.row(11))
+        self.assertRow(session, 11, "(1,0)")
         session.send(CTRL["x"] + "`")
-        session.settle(0.3)
-        self.assertIn("(3,0)", session.display.row(11))
+        self.assertRow(session, 11, "(3,0)")
 
         # And RET from the results side does the same.
         session.send(CTRL["x"] + "o")
         session.send(CTRL["n"] + CTRL["n"])
         session.send(RET)
-        session.settle(0.3)
-        self.assertIn("(5,0)", session.display.row(11))
+        self.assertRow(session, 11, "(5,0)")
         self.assertIn("o.py", session.display.row(11))
 
     def test_occur_works_in_a_buffer_that_is_not_a_file(self):
         session = self.start()
         session.send("alpha" + CTRL["j"] + "beta" + CTRL["j"] + "alpha again")
-        session.settle(0.3)
         session.send(ESC + "x" + "occur" + RET)
         session.send("alpha" + RET)
-        session.settle(0.5)
-        self.assertIn("2 matches", session.echo())
+        self.assertEcho(session, "2 matches")
         self.assertIn("in buffer: *scratch*", session.screen())
         session.send(CTRL["x"] + "`")
-        session.settle(0.3)
-        self.assertIn("*scratch*", session.display.row(11))
+        self.assertRow(session, 11, "*scratch*")
         self.assertIn("(1,0)", session.display.row(11))
 
     def test_the_matched_text_is_highlighted_in_the_results(self):
@@ -800,11 +838,9 @@ class SessionTest(unittest.TestCase):
         session.send(ESC + "x" + "grep" + RET)
         session.send("match" + RET)
         session.send("*.py" + RET)
-        session.settle(0.4)
         session.send(CTRL["x"] + "o")  # Into the results window.
         session.send("XXX")
-        session.settle(0.2)
-        self.assertIn("read-only", session.echo())
+        self.assertEcho(session, "read-only")
 
     def test_next_error_walks_the_hits(self):
         self.file("a.py", "target\n")
@@ -816,19 +852,16 @@ class SessionTest(unittest.TestCase):
         session.settle(0.4)
         # The first next-error visits the first hit, not the second.
         session.send(CTRL["x"] + "`")
-        session.settle(0.3)
-        self.assertIn("a.py", session.display.row(11))
+        self.assertRow(session, 11, "a.py")
         session.send(CTRL["x"] + "`")
-        session.settle(0.3)
-        self.assertIn("b.py", session.display.row(11))
+        self.assertRow(session, 11, "b.py")
         self.assertIn("*grep*", session.display.row(22))
 
     def test_m_x_completes(self):
         path = self.file("c.txt", "text\n")
         session = self.start(path)
         session.send(ESC + "x" + "query-r" + "\t")
-        session.settle(0.3)
-        self.assertIn("M-x query-replace", session.echo())
+        self.assertEcho(session, "M-x query-replace")
         session.send(CTRL["g"])
 
     def test_completion_opens_a_window_of_candidates(self):
@@ -857,17 +890,14 @@ class SessionTest(unittest.TestCase):
         with open(path, "w") as handle:
             handle.write("somebody else\n")
         session.send("mine")
-        session.settle(1.2)
-        self.assertEqual(self.contents(path), "somebody else\n")
-        self.assertIn("[disk changed]", session.mode_line())
+        self.assertModeLine(session, "[disk changed]")
+        self.assertSaved(path, "somebody else\n")
 
     def test_scratch_buffer_when_no_file_is_given(self):
         session = self.start()
-        session.settle(0.3)
-        self.assertIn("*scratch*", session.mode_line())
+        self.assertModeLine(session, "*scratch*")
         session.send("typed into scratch")
-        session.settle(0.8)
-        self.assertIn("typed into scratch", session.display.row(0))
+        self.assertRow(session, 0, "typed into scratch")
         session.send(CTRL["x"] + CTRL["c"])
         session.process.wait(timeout=5)
 
@@ -877,8 +907,7 @@ class SessionTest(unittest.TestCase):
         session = self.start(path)
 
         session.send(CTRL["x"] + "b")  # A prompt that has to be escapable.
-        session.settle(0.2)
-        self.assertIn("Switch to buffer", session.echo())
+        self.assertEcho(session, "Switch to buffer")
         session.send(ESC)
         session.settle(0.3)
         self.assertIn("ESC-", session.echo())  # A prefix, even here.
@@ -887,10 +916,8 @@ class SessionTest(unittest.TestCase):
         self.assertNotIn("Switch to buffer", session.echo())
 
         session.send(CTRL["s"] + "beta")  # And a search that has to abort.
-        session.settle(0.2)
-        self.assertIn("I-search: beta", session.echo())
+        self.assertEcho(session, "I-search: beta")
         session.send(ESC)
-        session.settle(0.3)
         session.send(ESC)
         session.settle(0.3)
         self.assertIn("(1,0)", session.mode_line())  # Back where it started.
@@ -906,38 +933,29 @@ class SessionTest(unittest.TestCase):
         session.settle(0.5)  # Far longer than any Meta timeout.
         self.assertIn("ESC-", session.echo())  # Waiting, and saying so.
         session.send(">")
-        session.settle(0.3)
-        self.assertIn("(101,0)", session.mode_line())
+        self.assertModeLine(session, "(101,0)")
 
         session.send(ESC)
-        session.settle(0.4)
         session.send("<")
-        session.settle(0.3)
-        self.assertIn("(1,0)", session.mode_line())
+        self.assertModeLine(session, "(1,0)")
 
     def test_esc_percent_starts_query_replace(self):
         path = self.file("qr.txt", "one two one\n")
         session = self.start(path)
         session.send(ESC)
-        session.settle(0.4)
         session.send("%")
-        session.settle(0.3)
-        self.assertIn("Query replace", session.echo())
+        self.assertEcho(session, "Query replace")
         session.send("one" + RET)
         session.send("1" + RET)
-        session.settle(0.3)
         session.send("!")
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "1 two 1\n")
+        self.assertSaved(path, "1 two 1\n")
 
     def test_esc_esc_quits(self):
         path = self.file("qq.txt", "text\n")
         session = self.start(path)
         session.send(CTRL["x"] + "b")
-        session.settle(0.2)
-        self.assertIn("Switch to buffer", session.echo())
+        self.assertEcho(session, "Switch to buffer")
         session.send(ESC)
-        session.settle(0.3)
         session.send(ESC)
         session.settle(0.3)
         self.assertNotIn("Switch to buffer", session.echo())
@@ -947,17 +965,14 @@ class SessionTest(unittest.TestCase):
                                           for n in range(1, 101)))
         session = self.start(path)
         session.send(CTRL["x"] + "2")
-        session.settle(0.3)
-        self.assertIn("s.txt", session.display.row(11))
+        self.assertRow(session, 11, "s.txt")
         self.assertIn("s.txt", session.display.row(22))
 
         # The two windows keep their own places in the same file.
         session.send(CTRL["x"] + "o")
         session.send(ESC)
-        session.settle(0.3)
         session.send(">")
-        session.settle(0.3)
-        self.assertIn("(1,0)", session.display.row(11))
+        self.assertRow(session, 11, "(1,0)")
         self.assertIn("(101,0)", session.display.row(22))
 
         session.send(CTRL["x"] + "1")
@@ -980,13 +995,11 @@ class SessionTest(unittest.TestCase):
 
         session.send(CTRL["x"] + "o")
         session.send(RET)  # RET on the first hit, from the results window.
-        session.settle(0.4)
-        self.assertIn("one.py", session.display.row(11))
+        self.assertRow(session, 11, "one.py")
         self.assertIn("*grep*", session.display.row(22))
 
         session.send(CTRL["x"] + "`")  # next-error, from the file window.
-        session.settle(0.4)
-        self.assertIn("two.py", session.display.row(11))
+        self.assertRow(session, 11, "two.py")
         self.assertIn("*grep*", session.display.row(22))
 
     def test_history_survives_the_editor_being_closed(self):
@@ -995,7 +1008,6 @@ class SessionTest(unittest.TestCase):
 
         first = self.start(self.file("a.txt", "a\n"), history=store)
         first.send(CTRL["x"] + CTRL["f"])
-        first.settle(0.2)
         first.send(CTRL["a"] + CTRL["k"] + target + RET)
         first.settle(0.4)
         self.assertIn("remembered.txt", first.mode_line())
@@ -1004,9 +1016,7 @@ class SessionTest(unittest.TestCase):
 
         second = self.start(self.file("b.txt", "b\n"), history=store)
         second.send(CTRL["x"] + CTRL["f"])
-        second.settle(0.2)
         second.send(ESC)  # ESC p is how M-p is typed without a Meta key.
-        second.settle(0.3)
         second.send("p")
         second.settle(0.3)
         # macOS temporary directories are long enough that the recalled path
@@ -1028,12 +1038,9 @@ class SessionTest(unittest.TestCase):
         session.settle(0.5)
 
         session.send(ESC + "x" + "grep" + RET)
-        session.settle(0.2)
         session.send(ESC)
-        session.settle(0.3)
         session.send("p")
-        session.settle(0.3)
-        self.assertIn("Grep (regexp): alpha", session.echo())
+        self.assertEcho(session, "Grep (regexp): alpha")
 
     def test_trailing_whitespace_is_marked_quietly_and_without_color(self):
         # The second line holds nothing but indentation, which is what most
@@ -1072,15 +1079,13 @@ class SessionTest(unittest.TestCase):
     def test_mode_line_carries_the_coding_and_eol_convention(self):
         unix = self.file("u.txt", "one\n")
         session = self.start(unix)
-        session.settle(0.3)
-        self.assertIn("-UUU:---  F1  u.txt", session.mode_line())
+        self.assertModeLine(session, "-UUU:---  F1  u.txt")
         self.assertIn("(Fundamental)", session.mode_line())
 
         dos = os.path.join(self.directory, "d.txt")
         with open(dos, "wb") as handle:
             handle.write(b"one\r\ntwo\r\n")
         session.send(CTRL["x"] + CTRL["f"])
-        session.settle(0.2)
         session.send(CTRL["a"] + CTRL["k"] + dos + RET)
         session.settle(0.4)
         # The one character of the group that carries news: CRLF.
@@ -1089,7 +1094,6 @@ class SessionTest(unittest.TestCase):
     def test_a_long_answer_scrolls_so_the_cursor_stays_visible(self):
         session = self.start(self.file("s.txt", "text\n"))
         session.send(CTRL["x"] + CTRL["f"])
-        session.settle(0.2)
         session.send(CTRL["a"] + CTRL["k"])
 
         long_path = "/" + "/".join("directory%02d" % n for n in range(12))
@@ -1103,8 +1107,7 @@ class SessionTest(unittest.TestCase):
 
         # And going back to the front of it scrolls the other way.
         session.send(CTRL["a"])
-        session.settle(0.3)
-        self.assertIn("Find file: /directory00", session.echo())
+        self.assertEcho(session, "Find file: /directory00")
         session.send(CTRL["g"])
 
     def test_moving_over_parentheses(self):
@@ -1114,27 +1117,21 @@ class SessionTest(unittest.TestCase):
 
         # C-M-n from the start goes past the whole group, nesting included.
         session.send(ESC)
-        session.settle(0.25)
         session.send(CTRL["n"])
         session.settle(0.3)
         self.assertIn("(1,27)", session.mode_line())  # Just past the ")".
 
         # C-M-p comes back to the "(" that opened it.
         session.send(ESC)
-        session.settle(0.25)
         session.send(CTRL["p"])
-        session.settle(0.3)
-        self.assertIn("(1,12)", session.mode_line())
+        self.assertModeLine(session, "(1,12)")
 
     def test_an_unbalanced_group_says_so_rather_than_wandering(self):
         path = self.file("u.py", "open(this one never closes\n")
         session = self.start(path)
-        session.settle(0.3)
         session.send(ESC)
-        session.settle(0.25)
         session.send(CTRL["n"])
-        session.settle(0.3)
-        self.assertIn("Scan error", session.echo())
+        self.assertEcho(session, "Scan error")
         self.assertIn("(1,0)", session.mode_line())  # And did not move.
 
     def test_paths_are_shown_with_the_home_directory_as_a_tilde(self):
@@ -1143,19 +1140,16 @@ class SessionTest(unittest.TestCase):
         session = self.start(path, home=self.directory)
 
         session.send(CTRL["x"] + CTRL["f"])
-        session.settle(0.3)
-        self.assertIn("Find file: ~/work/", session.echo())
+        self.assertEcho(session, "Find file: ~/work/")
         self.assertNotIn(self.directory, session.echo())
 
         # And it is only how it is shown: completion still resolves it.
         session.send("w.txt" + RET)
-        session.settle(0.4)
-        self.assertIn("w.txt", session.mode_line())
+        self.assertModeLine(session, "w.txt")
 
         # C-x C-s reports where it wrote, abbreviated the same way.
         session.send("!" + CTRL["x"] + CTRL["s"])
-        session.settle(0.4)
-        self.assertIn("Wrote ~/work/w.txt", session.echo())
+        self.assertEcho(session, "Wrote ~/work/w.txt")
 
     def test_the_package_directory_is_runnable(self):
         """The form the README's alias uses, from a directory of its own.
@@ -1168,8 +1162,7 @@ class SessionTest(unittest.TestCase):
         session = self.start(path, entry=[os.path.join(ROOT, "bkmacs")],
                              cwd=self.directory)
         session.send(CTRL["e"] + "!")
-        session.settle(1.0)
-        self.assertEqual(self.contents(path), "run me!\n")
+        self.assertSaved(path, "run me!\n")
         self.assertIn("r.txt", session.mode_line())
 
     def test_m_q_fills_the_paragraph_around_point(self):
@@ -1180,7 +1173,6 @@ class SessionTest(unittest.TestCase):
         session = self.start(path)
 
         session.send(ESC)
-        session.settle(0.25)
         session.send("q")
         session.settle(1.0)
         filled = self.contents(path).split("\n")
@@ -1196,7 +1188,6 @@ class SessionTest(unittest.TestCase):
                                  "eight nine ten eleven twelve thirteen\n")
         session = self.start(path)
         session.send(ESC)
-        session.settle(0.25)
         session.send("q")
         session.settle(1.0)
         lines = self.contents(path).rstrip("\n").split("\n")
@@ -1247,12 +1238,10 @@ class SessionTest(unittest.TestCase):
         self.assertIn("****", session.echo())  # Echoed, but not shown.
         self.assertNotIn("nope", session.echo())
         session.send(RET)
-        session.settle(2.0)
-        self.assertIn("Wrong password", session.echo())
+        self.assertEcho(session, "Wrong password")
 
         session.send(self.PASSWORD + RET)
-        session.settle(2.0)
-        self.assertIn("秘密", session.screen())
+        self.assertScreen(session, "秘密")
         self.assertIn("(Encrypted)", session.mode_line())
 
         # No autosave here, however long the typing stops for: half a second
@@ -1278,8 +1267,7 @@ class SessionTest(unittest.TestCase):
         session.settle(2.0)
         session.send("two ")
         session.send(CTRL["x"] + CTRL["c"])
-        session.settle(0.5)
-        self.assertIn("Save file", session.echo())
+        self.assertEcho(session, "Save file")
         session.send("y")
         session.process.wait(timeout=10)
         self.assertEqual(self.decrypted(path), "two one\n")
