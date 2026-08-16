@@ -129,7 +129,7 @@ key of the same effect.
 | `M-x query-replace-regexp` | query-replace-regexp | the same questions, by regexp; `\1` is the first group |
 | `M-x grep` | grep | Python regexps, over a tree of files |
 | `M-x occur` | occur | the same, over this buffer |
-| `C-x \`` | next-error | walks the hits of whichever ran last |
+| ``C-x ` `` | next-error | walks the hits of whichever ran last |
 
 A pattern typed in lower case ignores case; one capital letter makes it
 exact. With the region active, either query-replace works inside it and
@@ -262,7 +262,7 @@ because a terminal can hold several. This has one, so it always says `F1`.
 Then the buffer name, how much of it is above the window (`Top`, `Bot`,
 `All`, or a percentage), `(line,column)` with the column counted from
 zero, and the major mode — `Fundamental` unless the buffer is a `*grep*`,
-an `*Occur*` or a `*Completions*`.
+an `*Occur*`, a `*Completions*` or a Markdown file.
 
 ### grep and occur
 
@@ -283,7 +283,7 @@ was never a file, and jumps back into that buffer rather than opening
 anything.
 
 Either way the results appear in a window below and the cursor stays
-where it was. `C-x \`` walks the hits from there, first one first,
+where it was. ``C-x ` `` walks the hits from there, first one first,
 opening each in the window you are already in. `RET` on a line of the
 results does the same from the other side. The results stay put
 throughout.
@@ -482,6 +482,39 @@ It costs three thousandths of the file. `NOTICE` is the original of the
 two — the one a person or a licence scanner finds — and the generator
 copies it into the dictionary, so the two cannot come to disagree.
 
+## Markdown
+
+A file called `*.md` is coloured. It is the only file type this editor
+knows anything about, and the reason it knows about one is that a README
+is the longest thing anybody here writes by hand — long enough that
+finding a heading, or seeing where a code fence ends, is worth more than
+it would be in a language a compiler is going to check anyway.
+
+Headings are magenta, code is green — inline and fenced alike — and both
+halves of a link are cyan, with the URL underlined so that you can see
+where the words stop and the address starts. Bullets, the `>` of a quote
+and `---` are markers: only the marker is coloured, and the text after it
+is left as ordinary text. `**strong**` is bold and `*emphasis*` is
+italic, or underlined on a terminal with no italics to give.
+
+Foreground colours only, the rule the rest of the display already
+follows: nothing here paints a background of its own.
+
+Nothing inside a fence means anything, which is what a fence is for — a
+`console` block full of globs and asterisks comes out as the shell wrote
+it. Anything that would need more than the line in front of it is left
+out: no reference definitions resolved, no list nesting, and `---` is
+always a thematic break rather than sometimes the underline of a
+heading, since telling those apart needs the line before. A code span or
+an emphasis that a filled paragraph has broken across two lines is not
+joined back up either — it renders as it should and is simply left
+uncoloured here, which is a fair price for a code fence being the only
+thing in the file that needs more than one line to understand.
+
+It is not a major mode, and there is nothing to turn on or off. `M-q`
+still fills a paragraph the way it does everywhere else, and every key
+does what it does in any other buffer.
+
 ## Autosave, and the one case it stops
 
 The buffer is written to its own file — not to a `#file#` copy — half a
@@ -534,10 +567,12 @@ path. It is on macOS by default.
 
 ## Not here
 
-Syntax highlighting, major modes, elisp, extension in Python, keyboard
-macros, dabbrev, registers. All deliberate. `C-x r` holds the rectangle
-commands and nothing else. Windows split horizontally only (`C-x 2`), and
-share the height evenly rather than being resizable.
+Major modes, elisp, extension in Python, keyboard macros, dabbrev,
+registers. All deliberate, and syntax highlighting was on this list until
+Markdown came off it — a colour for a `*.md` file costs one module and no
+configuration, where a mode for every language costs both. `C-x r` holds
+the rectangle commands and nothing else. Windows split horizontally only
+(`C-x 2`), and share the height evenly rather than being resizable.
 
 ## Tests
 

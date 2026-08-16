@@ -20,9 +20,16 @@ import curses
 from functools import lru_cache
 from typing import Optional
 
+from . import markdown
 from .buffer import Buffer, Pos
 from .layout import (Expanded, char_width, display_width, expand, pad,
                      split_columns, truncate)
+
+#: Italics are not in the terminfo of every terminal, and ncurses is old enough
+#: in places not to have the attribute at all.  Underline stands in: emphasis
+#: has to differ from ordinary text somehow, and the alternative is bold, which
+#: is what strong emphasis already is.
+ITALIC = getattr(curses, "A_ITALIC", curses.A_UNDERLINE)
 
 #: A row of the buffer and which of its wrapped segments is meant.
 ScreenPos = tuple[int, int]
@@ -141,6 +148,20 @@ class Display:
     PAREN = curses.A_BOLD
     MATCH = curses.A_BOLD
 
+    #: Markdown, on a terminal that has no colours to give.  The structure a
+    #: README has -- headings, code, the two halves of a link -- survives in
+    #: attributes alone, which is not as good and is much better than nothing.
+    MARKDOWN = {
+        markdown.HEADING: curses.A_BOLD,
+        markdown.FENCE: curses.A_BOLD,
+        markdown.CODE: curses.A_NORMAL,
+        markdown.LINK: curses.A_NORMAL,
+        markdown.URL: curses.A_UNDERLINE,
+        markdown.MARKER: curses.A_BOLD,
+        markdown.STRONG: curses.A_BOLD,
+        markdown.EMPHASIS: ITALIC,
+    }
+
     def __init__(self, stdscr) -> None:
         self.stdscr = stdscr
         self._size = self.size()
@@ -155,8 +176,19 @@ class Display:
             curses.use_default_colors()
             curses.init_pair(1, curses.COLOR_RED, -1)
             curses.init_pair(2, curses.COLOR_CYAN, -1)
+            curses.init_pair(3, curses.COLOR_MAGENTA, -1)
+            curses.init_pair(4, curses.COLOR_GREEN, -1)
+            curses.init_pair(5, curses.COLOR_YELLOW, -1)
             self.MATCH = curses.color_pair(1) | curses.A_BOLD
             self.PAREN = curses.color_pair(2) | curses.A_BOLD
+            self.MARKDOWN = dict(self.MARKDOWN, **{
+                markdown.HEADING: curses.color_pair(3) | curses.A_BOLD,
+                markdown.CODE: curses.color_pair(4),
+                markdown.FENCE: curses.color_pair(4) | curses.A_BOLD,
+                markdown.LINK: curses.color_pair(2),
+                markdown.URL: curses.color_pair(2) | curses.A_UNDERLINE,
+                markdown.MARKER: curses.color_pair(5),
+            })
         except curses.error:
             pass
 
@@ -237,10 +269,11 @@ class Display:
 
             rows = screen_rows(buffer, width, top, rows_high)
             region = self._region(buffer) if selected else None
+            fences = self._fences(buffer)
             at = point_screen(buffer, width, point)
             for offset, position in enumerate(rows):
                 self._draw_row(origin + offset, width, buffer, position,
-                               region, parens if selected else ())
+                               region, parens if selected else (), fences)
                 if selected and position == at:
                     cursor = (origin + offset,
                               self._cursor_column(buffer, width, position,
@@ -278,9 +311,23 @@ class Display:
         start, end = buffer.mark, buffer.point
         return (start, end) if start <= end else (end, start)
 
+    def _fences(self, buffer: Buffer) -> Optional[list[bool]]:
+        """Which of a Markdown buffer's lines are inside a code fence.
+
+        ``None`` for every other buffer, which is what turns the colouring off
+        for them.  Recomputed on every frame rather than cached: it is one
+        comparison per line and only Markdown buffers pay it, where a cache
+        would have to be told about every edit, every undo, and every reread of
+        the file from disk -- three chances to leave the screen wrong.
+        """
+        if buffer.kind or not markdown.is_markdown(buffer.name):
+            return None
+        return markdown.fenced(buffer.lines)
+
     def _draw_row(self, y: int, width: int, buffer: Buffer, position: ScreenPos,
                   region: Optional[tuple[Pos, Pos]],
-                  parens: tuple[Pos, ...]) -> None:
+                  parens: tuple[Pos, ...],
+                  fences: Optional[list[bool]] = None) -> None:
         row, index = position
         line = buffer.lines[row]
         expanded, segments = layout_line(line, width)
@@ -293,13 +340,23 @@ class Display:
         highlight = {column for (parenthesis_row, column) in parens
                      if parenthesis_row == row}
         matches = buffer.highlights.get(row, ())
+        styled = () if fences is None else markdown.spans(line, fences[row])
 
         # Group characters into runs sharing one attribute; a per-character
-        # addstr would be a few thousand curses calls per keystroke.
+        # addstr would be a few thousand curses calls per keystroke.  What the
+        # cascade below says, in order, is that what a character is matters
+        # less than what is being done to it: Markdown is what the text is,
+        # trailing whitespace is a warning about it, a search match and a paren
+        # are answers to something just typed, and the region is the thing the
+        # next command is about to act on.
         runs: list[tuple[str, int]] = []
         for offset, character in enumerate(text):
             source = expanded.owners[segment.start + offset]
             attribute = curses.A_NORMAL
+            for start, end, kind in styled:
+                if start <= source < end:
+                    attribute = self.MARKDOWN[kind]
+                    break
             if source >= trailing and trailing < len(line):
                 attribute = self.TRAILING
             if any(start <= source < end for start, end in matches):
@@ -387,6 +444,8 @@ class Display:
             # buffer that is not being autosaved, so ``**`` on it means what
             # it means everywhere else and nowhere else here -- unsaved work.
             return "Encrypted"
+        if markdown.is_markdown(buffer.name):
+            return "Markdown"
         return "Fundamental"
 
     def _where(self, buffer: Buffer, rows: list[ScreenPos]) -> str:

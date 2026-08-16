@@ -25,6 +25,7 @@ from bkmacs.history import History
 from bkmacs.layout import (char_width, display_width, expand, fill,
                            index_at_column, joinable, span_at_columns,
                            split_columns, truncate, unfill)
+from bkmacs.markdown import fenced, is_markdown, spans
 from bkmacs.search import (glob_regexp, search_backward,
                            search_backward_regexp, search_forward,
                            search_forward_regexp)
@@ -832,6 +833,90 @@ class TestGlob(unittest.TestCase):
     def test_dots_are_literal(self):
         self.assertFalse(self.matches("*.py", "pyx"))
         self.assertTrue(self.matches("Makefile", "sub/Makefile"))
+
+
+class TestMarkdown(unittest.TestCase):
+    def marked(self, line: str, inside_fence: bool = False) -> list:
+        """What each span covers, and what it was called."""
+        return [(span.kind, line[span.start:span.end])
+                for span in spans(line, inside_fence)]
+
+    def test_only_markdown_files(self):
+        self.assertTrue(is_markdown("README.md"))
+        self.assertTrue(is_markdown("NOTES.Markdown"))
+        self.assertFalse(is_markdown("editor.py"))
+        self.assertFalse(is_markdown("*scratch*"))
+
+    def test_headings(self):
+        self.assertEqual(self.marked("## Keys"), [("heading", "## Keys")])
+        self.assertEqual(self.marked("###### deep"),
+                         [("heading", "###### deep")])
+        self.assertEqual(self.marked("======"), [("heading", "======")])
+        self.assertEqual(self.marked("#hashtag"), [])
+        self.assertEqual(self.marked("####### seven"), [])
+
+    def test_fences_run_until_they_are_closed(self):
+        self.assertEqual(fenced(["a", "```py", "x", "```", "b"]),
+                         [False, True, True, True, False])
+        self.assertEqual(fenced(["```", "x"]), [True, True])
+        self.assertEqual(fenced(["~~~", "x", "~~~"]), [True, True, True])
+
+    def test_a_fenced_line_is_code_and_the_fence_is_the_fence(self):
+        self.assertEqual(self.marked("```python", True),
+                         [("fence", "```python")])
+        self.assertEqual(self.marked("  x = 1  ", True),
+                         [("code", "  x = 1  ")])
+        # Nothing inside a fence means anything: this is a shell prompt.
+        self.assertEqual(self.marked("$ ls *.md", True),
+                         [("code", "$ ls *.md")])
+
+    def test_inline_code_takes_precedence_over_what_is_inside_it(self):
+        self.assertEqual(self.marked("a `*x*` b"), [("code", "`*x*`")])
+        self.assertEqual(self.marked("a ``x ` y`` b"), [("code", "``x ` y``")])
+        self.assertEqual(self.marked("unclosed ` tick"), [])
+
+    def test_links_are_coloured_in_two_halves(self):
+        self.assertEqual(self.marked("see [docs](http://x/y) now"),
+                         [("link", "[docs]"), ("url", "(http://x/y)")])
+        self.assertEqual(self.marked("![alt](a.png)"),
+                         [("link", "![alt]"), ("url", "(a.png)")])
+        self.assertEqual(self.marked("[text] alone"), [])
+
+    def test_bare_urls_and_autolinks(self):
+        self.assertEqual(self.marked("go to https://example.com/a. done"),
+                         [("url", "https://example.com/a")])
+        self.assertEqual(self.marked("an <https://example.com> autolink"),
+                         [("url", "<https://example.com>")])
+        self.assertEqual(self.marked("<not a link>"), [])
+
+    def test_emphasis(self):
+        self.assertEqual(self.marked("a **bold** b"), [("strong", "**bold**")])
+        self.assertEqual(self.marked("a *em* b"), [("emphasis", "*em*")])
+        self.assertEqual(self.marked("a _em_ b"), [("emphasis", "_em_")])
+
+    def test_emphasis_leaves_arithmetic_and_identifiers_alone(self):
+        self.assertEqual(self.marked("2 * 3 * 4"), [])
+        self.assertEqual(self.marked("snake_case_name here"), [])
+        self.assertEqual(self.marked("a \\*not em\\* b"), [])
+
+    def test_markers_are_coloured_and_their_text_is_not(self):
+        self.assertEqual(self.marked("- an item"), [("marker", "-")])
+        self.assertEqual(self.marked("  1. numbered"), [("marker", "1.")])
+        self.assertEqual(self.marked("> quoted"), [("marker", "> ")])
+        self.assertEqual(self.marked("---"), [("marker", "---")])
+        self.assertEqual(self.marked("- a `x` item"),
+                         [("marker", "-"), ("code", "`x`")])
+
+    def test_a_dash_list_is_not_a_thematic_break(self):
+        self.assertEqual(self.marked("- - -"), [("marker", "- - -")])
+        self.assertEqual(self.marked("- one"), [("marker", "-")])
+
+    def test_spans_never_overlap_and_run_left_to_right(self):
+        line = "> - see [a](b) and `c` and **d** at https://e/f"
+        found = spans(line)
+        self.assertTrue(all(one.end <= two.start
+                            for one, two in zip(found, found[1:])))
+        self.assertTrue(all(one.start < one.end for one in found))
 
 
 if __name__ == "__main__":

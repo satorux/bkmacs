@@ -42,8 +42,9 @@ BLANK = (" ", frozenset())
 #: SGR codes worth remembering.  Attributes matter as much as characters: a
 #: mode line drawn dim over reverse video is on the screen and invisible, and
 #: a grid that only kept the text would call that a pass.
-STYLES = {1: "bold", 2: "dim", 4: "underline", 7: "reverse"}
-UNSTYLES = {22: ("bold", "dim"), 24: ("underline",), 27: ("reverse",)}
+STYLES = {1: "bold", 2: "dim", 3: "italic", 4: "underline", 7: "reverse"}
+UNSTYLES = {22: ("bold", "dim"), 23: ("italic",), 24: ("underline",),
+            27: ("reverse",)}
 
 
 class Screen:
@@ -1388,6 +1389,70 @@ class SessionTest(unittest.TestCase):
         session.send("y")
         session.process.wait(timeout=10)
         self.assertEqual(self.decrypted(path), "two one\n")
+
+    MARKDOWN = ("# Title\n"
+                "\n"
+                "A [link](https://example.com) and `code` and **bold** *em*.\n"
+                "\n"
+                "```console\n"
+                "$ ls **not bold**\n"
+                "```\n"
+                "\n"
+                "- an item\n")
+
+    def test_markdown_is_coloured_by_what_the_line_is(self):
+        path = self.file("README.md", self.MARKDOWN)
+        session = self.start(path)
+        styles = session.display.styles_of
+        # Magenta and bold for a heading, so that structure is visible from
+        # across the room; cyan for both halves of a link, green for code.
+        self.assertEqual(styles(0, "# Title"), frozenset({"bold", "fg5"}))
+        self.assertIn("fg6", styles(2, "[link]"))
+        self.assertIn("fg6", styles(2, "(https://example.com)"))
+        self.assertIn("underline", styles(2, "(https://example.com)"))
+        self.assertIn("fg2", styles(2, "`code`"))
+        self.assertIn("bold", styles(2, "**bold**"))
+        self.assertIn("italic", styles(2, "*em*"))
+        self.assertEqual(styles(2, " and "), frozenset())
+        self.assertIn("fg3", styles(8, "-"))
+        self.assertEqual(styles(8, "an item"), frozenset())
+
+    def test_nothing_inside_a_fence_is_markdown(self):
+        path = self.file("README.md", self.MARKDOWN)
+        session = self.start(path)
+        # The whole block is code, asterisks and all -- a shell line full of
+        # globs is the usual thing to find in a README's console block.
+        self.assertIn("fg2", session.display.styles_of(5, "$ ls **not bold**"))
+        self.assertNotIn("bold",
+                         session.display.styles_of(5, "**not bold**"))
+
+    def test_colouring_follows_the_text_as_it_is_typed(self):
+        path = self.file("README.md", "plain\n")
+        session = self.start(path)
+        self.assertEqual(session.display.styles_of(0, "plain"), frozenset())
+        session.send("## ")
+        self.assertRow(session, 0, "## plain")
+        self.assertIn("fg5", session.display.styles_of(0, "## plain"))
+        self.assertModeLine(session, "Markdown")
+
+    def test_a_search_match_wins_over_the_markdown_colour(self):
+        path = self.file("README.md", "# Title here\n\nplain\n")
+        session = self.start(path)
+        self.assertEqual(session.display.styles_of(0, "Title"),
+                         frozenset({"bold", "fg5"}))
+        session.send(CTRL["s"] + "Title")
+        # What you just searched for has to be findable on the screen, so it
+        # takes the row over from whatever the text happened to be.
+        self.assertIn("reverse", session.display.styles_of(0, "Title"))
+        self.assertEqual(session.display.styles_of(0, "here"),
+                         frozenset({"bold", "fg5"}))
+
+    def test_a_file_that_is_not_markdown_is_left_alone(self):
+        path = self.file("plain.txt", "# Title\n\n- `code` here\n")
+        session = self.start(path)
+        self.assertEqual(session.display.styles(0), frozenset())
+        self.assertEqual(session.display.styles(2), frozenset())
+        self.assertModeLine(session, "Fundamental")
 
     def process_state(self, pid: int) -> str:
         """The first letter of the process state, on macOS as well as Linux."""
