@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bkmacs.history
 from bkmacs import crypt, migemo
 from bkmacs.buffer import Buffer, KillRing, advance, adjust
-from bkmacs.editor import capitalized, in_columns
+from bkmacs.editor import capitalized, in_columns, quoted
 from bkmacs.history import History
 from bkmacs.layout import (char_width, display_width, expand, fill,
                            index_at_column, joinable, span_at_columns,
@@ -736,6 +736,22 @@ class TestCapitalized(unittest.TestCase):
     def test_a_word_with_no_letters_in_it_is_left_alone(self):
         self.assertEqual(capitalized("123"), "123")
         self.assertEqual(capitalized("日本語"), "日本語")
+
+
+class TestQuoted(unittest.TestCase):
+    def test_a_printable_key_is_itself(self):
+        self.assertEqual(quoted("x"), "x")
+        self.assertEqual(quoted("あ"), "あ")
+
+    def test_a_named_key_is_the_character_it_was(self):
+        self.assertEqual(quoted("TAB"), "\t")
+        self.assertEqual(quoted("RET"), "\r")
+        self.assertEqual(quoted("C-l"), "\x0c")
+        self.assertEqual(quoted("C-@"), "\0")
+
+    def test_a_key_that_is_no_character_at_all(self):
+        self.assertIsNone(quoted("M-x"))
+        self.assertIsNone(quoted("<resize>"))
 
 
 class TestColumns(unittest.TestCase):

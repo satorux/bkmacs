@@ -101,6 +101,7 @@ key of the same effect.
 | `C-k` | kill-line | consecutive kills join into one entry |
 | `M-q` | fill-paragraph | rewraps to 74 columns, kinsoku and all |
 | `C-x SPC` | fixup-whitespace | |
+| `C-q` | quoted-insert | the next key as a character: `C-q TAB` is the only way to a real tab |
 | `C-x C-u` `C-x C-l` | upcase-region, downcase-region | |
 | `M-u` `M-l` `M-c` | upcase, downcase, capitalize the word | from point to the end of it, and point lands there |
 | `C-/` `C-_` `C-\` | undo | Emacs' undo ring — see below |

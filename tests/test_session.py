@@ -563,6 +563,16 @@ class SessionTest(unittest.TestCase):
         session.send(CTRL["y"])            # And all of it comes back.
         self.assertSaved(path, "one\ntwo\nthree\n")
 
+    def test_control_q_inserts_the_next_key_as_itself(self):
+        path = self.file("q.txt", "")
+        session = self.start(path)
+        # TAB indents by two spaces; C-q TAB is the only way to a real one.
+        session.send("a" + CTRL["q"] + "\t" + "b")
+        session.send(CTRL["q"] + CTRL["l"])
+        self.assertSaved(path, "a\tb\x0c")
+        # And it is shown the way control characters are shown.
+        self.assertRow(session, 0, "^L")
+
     def test_query_replace(self):
         path = self.file("c.txt", "one two one two\n")
         session = self.start(path)

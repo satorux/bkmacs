@@ -159,6 +159,27 @@ def capitalized(text: str) -> str:
     return text
 
 
+def quoted(key: str) -> Optional[str]:
+    """The character a key stands for, for C-q to insert.
+
+    Control keys arrive named rather than as themselves -- the terminal sends
+    a tab and the key decoder calls it ``TAB`` -- so this turns the name back
+    into what was typed.
+    """
+    if len(key) == 1:
+        return key
+    named = {"TAB": "\t", "RET": "\r", "ESC": "\x1b", "DEL": "\x7f"}
+    if key in named:
+        return named[key]
+    if key.startswith("C-") and len(key) == 3:
+        letter = key[2].lower()
+        if "a" <= letter <= "z":
+            return chr(ord(letter) - ord("a") + 1)
+        if key[2] == "@":
+            return "\0"
+    return None
+
+
 def in_columns(items: list[str], width: int) -> list[str]:
     """Lay a list out in columns, measured rather than counted."""
     step = max(display_width(item) for item in items) + 2
@@ -194,6 +215,7 @@ class Editor:
         "C-/": "undo", "C-_": "undo", "C-\\": "undo",
         "C-g": "keyboard-quit",
         "C-z": "suspend",
+        "C-q": "quoted-insert",
         "M-c": "capitalize-word", "M-u": "upcase-word", "M-l": "downcase-word",
         "M-x": "execute-extended-command",
         "<resize>": "ignore",
@@ -893,6 +915,23 @@ class Editor:
         text = convert(self.buffer.text_between(start, end))
         self.buffer.edit(start, end, text)
         self.buffer.point = advance(start, text)
+
+    def quoted_insert(self) -> None:
+        """``C-q``: the next key as a character rather than as a command.
+
+        The only way to type a tab into an editor that never inserts one, and
+        the only way to put a control character into a file on purpose.  What
+        goes in is what the terminal sent, and it is shown the way every other
+        control character is: C-q TAB is a tab, C-q C-l is ``^L``.
+        """
+        key = self.prefix("C-q-")
+        if key is None:
+            return
+        character = quoted(key)
+        if character is None:
+            self.message = "%s cannot be inserted" % key
+            return
+        self.buffer.insert(character)
 
     def mark_whole_buffer(self) -> None:
         """``C-x h``.  Point at the top and the mark at the bottom, so that
