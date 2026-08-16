@@ -7,6 +7,7 @@ so that there is still nothing to install.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,14 +17,16 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import bkmacs.history
-from bkmacs import crypt
+from bkmacs import crypt, migemo
 from bkmacs.buffer import Buffer, KillRing, advance, adjust
 from bkmacs.editor import in_columns
 from bkmacs.history import History
 from bkmacs.layout import (char_width, display_width, expand, fill,
                            index_at_column, joinable, span_at_columns,
                            split_columns, truncate, unfill)
-from bkmacs.search import glob_regexp, search_backward, search_forward
+from bkmacs.search import (glob_regexp, search_backward,
+                           search_backward_regexp, search_forward,
+                           search_forward_regexp)
 
 
 class TestLayout(unittest.TestCase):
@@ -418,6 +421,266 @@ class TestSearch(unittest.TestCase):
         buffer = self.buffer("吾輩は猫である\n名前はまだ無い")
         self.assertEqual(search_forward(buffer, "猫", (0, 0)), (0, 3))
         self.assertEqual(search_forward(buffer, "は", (0, 3)), (1, 2))
+
+
+class TestSearchRegexp(unittest.TestCase):
+    def buffer(self, text: str) -> Buffer:
+        return Buffer("t", None, text.split("\n"))
+
+    def test_forward_answers_with_the_whole_span(self):
+        buffer = self.buffer("one\n吾輩は猫である")
+        found = search_forward_regexp(buffer, re.compile("猫で?"), (0, 0))
+        self.assertEqual(found, ((1, 3), (1, 5)))
+
+    def test_backward_takes_the_last_match_before_the_start(self):
+        buffer = self.buffer("ab ab\nab")
+        regexp = re.compile("ab")
+        self.assertEqual(search_backward_regexp(buffer, regexp, (1, 0)),
+                         ((0, 3), (0, 5)))
+        self.assertEqual(search_backward_regexp(buffer, regexp, (0, 3)),
+                         ((0, 0), (0, 2)))
+
+    def test_an_empty_match_does_not_count_as_a_hit(self):
+        buffer = self.buffer("xxa")
+        found = search_forward_regexp(buffer, re.compile("b*a?"), (0, 0))
+        self.assertEqual(found, ((0, 2), (0, 3)))
+
+    def test_bound_stops_the_search(self):
+        buffer = self.buffer("one\ntwo\nthree")
+        regexp = re.compile("t..")
+        self.assertIsNone(search_forward_regexp(buffer, regexp, (0, 0),
+                                                bound=(1, 2)))
+        self.assertEqual(search_forward_regexp(buffer, regexp, (0, 0),
+                                               bound=(1, 3)),
+                         ((1, 0), (1, 3)))
+
+
+class TestMigemo(unittest.TestCase):
+    def test_romaji_becomes_kana(self):
+        self.assertEqual(migemo.to_hiragana("kensaku"), ("けんさく", ""))
+        self.assertEqual(migemo.to_hiragana("nihon"), ("にほん", ""))
+        self.assertEqual(migemo.to_hiragana("shashin"), ("しゃしん", ""))
+        self.assertEqual(migemo.to_hiragana("syashin"), ("しゃしん", ""))
+        self.assertEqual(migemo.to_hiragana("kitte"), ("きって", ""))
+        self.assertEqual(migemo.to_hiragana("tsukau"), ("つかう", ""))
+
+    def test_n_is_the_awkward_one(self):
+        # ん before a consonant, and な when a vowel is coming even though the
+        # letters are the same either way: konbanwa, konna, kanji, kannji.
+        self.assertEqual(migemo.to_hiragana("konbanwa"), ("こんばんわ", ""))
+        self.assertEqual(migemo.to_hiragana("konna"), ("こんな", ""))
+        self.assertEqual(migemo.to_hiragana("onna"), ("おんな", ""))
+        self.assertEqual(migemo.to_hiragana("kanji"), ("かんじ", ""))
+        self.assertEqual(migemo.to_hiragana("kannji"), ("かんじ", ""))
+        self.assertEqual(migemo.to_hiragana("kon'yaku"), ("こんやく", ""))
+        self.assertEqual(migemo.to_hiragana("shinnyuu"), ("しんにゅう", ""))
+        # Half typed: こん is a word, so a pair of them is not left waiting.
+        self.assertEqual(migemo.to_hiragana("hon"), ("ほん", ""))
+        self.assertEqual(migemo.to_hiragana("konn"), ("こん", ""))
+        self.assertEqual(migemo.to_hiragana("konnb"), ("こん", "b"))
+
+    def test_a_half_typed_syllable_is_kept_as_the_tail(self):
+        self.assertEqual(migemo.to_hiragana("kensak"), ("けんさ", "k"))
+        self.assertEqual(migemo.to_hiragana("kensaky"), ("けんさ", "ky"))
+        # The doubled letter is already っ; what is left is half of the next.
+        self.assertEqual(migemo.to_hiragana("kitt"), ("きっ", "t"))
+
+    def test_the_tail_says_which_kana_can_follow(self):
+        self.assertEqual(migemo.expansions("k"),
+                         ["か", "き", "きゃ", "きゅ", "きょ", "く", "け", "こ",
+                          "っ"])  # And っ, since kk is how っ is typed.
+        # A lone n is ん as much as it is the start of な.
+        self.assertIn("ん", migemo.expansions("n"))
+        self.assertIn("な", migemo.expansions("n"))
+
+    def test_a_consonant_may_still_be_the_front_of_a_doubled_one(self):
+        # っ is typed by doubling the consonant after it, so the t of set has
+        # not decided whether it is せた or せっ -- and only one of those is
+        # 設定.  Both are open until the next letter.
+        self.assertIn("た", migemo.expansions("t"))
+        self.assertIn("っ", migemo.expansions("t"))
+        self.assertNotIn("っ", migemo.expansions("n"))   # n doubles into ん.
+        self.assertNotIn("っ", migemo.expansions("ky"))  # Past the doubling.
+        self.assertIn("せっ", migemo.prefixes("set"))
+        self.assertIn("せた", migemo.prefixes("set"))
+
+    def test_prefixes_of_a_half_typed_word(self):
+        self.assertEqual(migemo.prefixes("kensaku"), ["けんさく"])
+        self.assertEqual(migemo.prefixes("nez"),
+                         ["ねざ", "ねじ", "ねじゃ", "ねじゅ", "ねじょ",
+                          "ねず", "ねぜ", "ねぞ", "ねっ"])
+
+    def test_katakana(self):
+        self.assertEqual(migemo.katakana("けんさく"), "ケンサク")
+        self.assertEqual(migemo.katakana("こーひー"), "コーヒー")
+
+    def test_alternation_shares_what_the_words_share(self):
+        self.assertEqual(migemo.alternation(["検索", "検査"]), "検[査索]")
+        self.assertEqual(migemo.alternation(["検索", "検査", "研削"]),
+                         "(?:検[査索]|研削)")
+        # A word that is the beginning of another leaves the rest optional,
+        # and the group is what keeps the ? from landing on one character.
+        self.assertEqual(migemo.alternation(["検索", "検索結果"]),
+                         "検索(?:結果)?")
+
+    def test_a_pattern_finds_the_romaji_the_kana_and_the_katakana(self):
+        regexp = re.compile(migemo.pattern("kensaku", words=migemo.Dictionary(
+            os.devnull)))
+        for text in ("kensaku", "けんさく", "ケンサク"):
+            self.assertRegex(text, regexp)
+        self.assertNotRegex("けんさ", regexp)
+
+    def test_katakana_ignores_the_marks_that_split_a_name(self):
+        # Whether a file writes ヴーヴ・クリコ or ヴーヴクリコ is not something
+        # the person searching for it knows, so neither spelling is a miss --
+        # and neither one has to be in the dictionary, since this is the
+        # katakana the reading makes rather than a word that was looked up.
+        nothing = migemo.Dictionary(os.devnull)
+        regexp = re.compile(migemo.pattern("vu-vukuriko", words=nothing))
+        self.assertRegex("ヴーヴ・クリコ", regexp)
+        self.assertRegex("ヴーヴクリコ", regexp)
+        self.assertRegex("ヴーヴ･クリコ", regexp)  # And in half width.
+        regexp = re.compile(migemo.pattern("janpo-ru", words=nothing))
+        self.assertRegex("ジャン＝ポール", regexp)
+        # The mark is allowed, not required, and only between characters.
+        self.assertNotRegex("ヴーヴ・クリ", re.compile(
+            migemo.pattern("vu-vukuriko", words=nothing)))
+
+    def test_a_missing_dictionary_leaves_the_kana(self):
+        words = migemo.Dictionary("/no/such/dictionary")
+        self.assertFalse(words.available)
+        self.assertEqual(words.words("けんさく"), [])
+        self.assertRegex("ケンサク", re.compile(migemo.pattern("kensaku",
+                                                              words=words)))
+
+
+class TestMigemoDictionary(unittest.TestCase):
+    """The dictionary that ships with the editor, searched where it lies."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not migemo.dictionary.available:
+            raise unittest.SkipTest("no migemo.dict in this checkout")
+
+    def test_a_reading_finds_the_words_written_with_it(self):
+        self.assertIn("検索", migemo.dictionary.words("けんさく"))
+        self.assertIn("実装", migemo.dictionary.words("じっそう"))
+        # 外字 is rank 152,159 by how often Mozc sees it written, and the
+        # first word you would look for in a program that reads EPWING
+        # dictionaries.  It is here because two-kanji words are discounted.
+        self.assertIn("外字", migemo.dictionary.words("がいじ"))
+
+    def test_a_partial_reading_finds_the_longer_ones(self):
+        self.assertIn("実装", migemo.dictionary.words("じっそ"))
+        # 鼠 is the word migemo's own page opens by finding, and it is only
+        # here because the first spelling of a reading is ranked by how
+        # ordinary the reading is: writing ねずみ as 鼠 is not ordinary.
+        self.assertIn("鼠", migemo.dictionary.words("ねず"))
+        self.assertRegex("鼠", re.compile(migemo.pattern("nez")))
+
+    def test_the_bisection_lands_on_the_first_line_of_the_range(self):
+        # Every word that comes back has to belong to a reading that starts
+        # with what was asked for; landing one line early is the failure this
+        # is here to catch, and it is invisible in the answer otherwise.
+        for reading in ("あ", "けんさく", "ん", "こんぴゅーた"):
+            found = migemo.dictionary.words(reading, 5)
+            self.assertTrue(all(found), reading)
+
+    def test_a_reading_nothing_starts_with_finds_nothing(self):
+        self.assertEqual(migemo.dictionary.words("ゑゑゑゑ"), [])
+
+    def test_the_limit_is_honoured(self):
+        self.assertEqual(len(migemo.dictionary.words("か", 7)), 7)
+
+    def test_the_words_are_in_the_pattern(self):
+        regexp = re.compile(migemo.pattern("kensaku"))
+        for text in ("検索", "検索結果", "けんさく", "kensaku"):
+            self.assertRegex(text, regexp)
+
+    def test_a_longer_query_never_finds_what_a_shorter_one_missed(self):
+        # けい has three hundred words under it, and a pattern that read part
+        # of that and stopped left behind whichever readings sort last: kei
+        # found 刑 and 京 and walked past 経由, and then keiy, which asks for
+        # strictly less, found it.  Typing more may only take matches away.
+        for query in ("kei", "keiy", "keiyu"):
+            self.assertRegex("経由", re.compile(migemo.pattern(query)))
+
+    def test_one_letter_matches_where_those_words_begin(self):
+        # d is で and だ and ど and ten thousand words, too many to spell out,
+        # so the pattern is the characters they start with -- all of them,
+        # rather than the two hundred that sort first, which is what used to
+        # find だ and walk past 電子.
+        regexp = re.compile(migemo.pattern("d"))
+        for text in ("電子ブック", "だんだん", "データ", "ndtpd"):
+            self.assertRegex(text, regexp)
+        self.assertEqual(regexp.search("電子ブック").group(0), "電")
+        self.assertNotRegex("猫", regexp)
+
+    def test_a_word_with_a_doubled_consonant_is_found_before_it_is_typed(self):
+        # せってい is not reachable from せ by any single kana, only by せっ,
+        # so a t that could not still turn into っ made set fail and sett
+        # work -- which is a strange thing for one keystroke to decide.
+        self.assertRegex("設定", re.compile(migemo.pattern("set")))
+        self.assertRegex("学校", re.compile(migemo.pattern("gak")))
+        self.assertRegex("切手", re.compile(migemo.pattern("kit")))
+
+    def test_a_half_typed_syllable_still_narrows_the_search(self):
+        # けん and an s that is not a kana yet: けんさ, けんし, けんす and the
+        # rest, but not けんと, and so 検索 and 検査 but not 検討.
+        regexp = re.compile(migemo.pattern("kens"))
+        for text in ("検索", "検査", "検察"):
+            self.assertRegex(text, regexp)
+        self.assertNotRegex("検討", regexp)
+
+    def test_the_file_is_sorted_which_is_what_makes_it_searchable(self):
+        with open(migemo.DICTIONARY, encoding="utf-8") as handle:
+            readings = [line.split("\t")[0] for line in handle
+                        if not line.startswith(";;")]
+        self.assertEqual(readings, sorted(readings))
+
+    def test_the_dictionary_carries_the_notice_that_covers_it(self):
+        # IPAdic asks that any copy of the words carry its notice, and two
+        # megabytes of words is the sort of file that gets taken out of a
+        # checkout on its own.  NOTICE is the original and the head of the
+        # dictionary is the copy; this is what keeps them the same text.
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "NOTICE"), encoding="utf-8") as handle:
+            notice = handle.read()
+        with open(migemo.DICTIONARY, encoding="utf-8") as handle:
+            head = [line[3:].rstrip() for line in handle
+                    if line.startswith(";;")]
+        for line in notice.splitlines():
+            self.assertIn(line.rstrip(), head)
+
+    def test_no_reading_is_longer_than_a_search_will_ever_be(self):
+        small = "ぁぃぅぇぉゃゅょゎっ"
+        with open(migemo.DICTIONARY, encoding="utf-8") as handle:
+            longest = max(sum(1 for c in line.split("\t")[0] if c not in small)
+                          for line in handle if not line.startswith(";;"))
+        self.assertLessEqual(longest, 5)
+        # Beats, not characters: じょうきょう is six characters and four
+        # beats, and counting characters would have thrown 状況 away.
+        self.assertIn("状況", migemo.dictionary.words("じょうきょう"))
+        # What is past the cut is not lost, only shorter: 東京大学 has no
+        # reading of its own any more and is found by 東京 instead.
+        self.assertEqual(migemo.dictionary.words("とうきょうだいがく"), [])
+        self.assertRegex("東京大学", re.compile(migemo.pattern("toukyou")))
+
+    def test_the_file_holds_no_word_that_needs_no_looking_up(self):
+        # The reading, and the reading in katakana with or without the marks
+        # that split a foreign name, are in every pattern already, and a word
+        # written in ASCII is one the keyboard can type.  A line carrying any
+        # of those back is a line that costs bytes to say nothing.
+        marks = str.maketrans("", "", "・･゠＝")
+        with open(migemo.DICTIONARY, encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith(";;"):
+                    continue
+                fields = line.rstrip("\n").split("\t")
+                spellings = (fields[0], migemo.katakana(fields[0]))
+                for word in fields[1:]:
+                    self.assertNotIn(word.translate(marks), spellings, line)
+                    self.assertFalse(word.isascii(), line)
 
 
 class TestHistory(unittest.TestCase):

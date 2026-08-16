@@ -453,6 +453,34 @@ class SessionTest(unittest.TestCase):
         session.settle(0.4)
         self.assertNotIn("h.txt", session.screen())
 
+    def test_migemo_searches_japanese_from_romaji(self):
+        path = self.file("d.txt", "one\n吾輩は猫である\n")
+        session = self.start(path)
+        session.send(CTRL["s"] + "neko")  # No M-m: migemo is where it starts.
+        session.settle(0.3)
+        self.assertIn("I-search: neko", session.echo())
+        # Point is left at the end of what the pattern matched, which is the
+        # one character 猫 and not the four letters that were typed.
+        session.send(RET + CTRL["k"])
+        session.settle(1.0)
+        self.assertEqual(self.contents(path), "one\n吾輩は猫\n")
+
+    def test_migemo_can_be_turned_off_and_stays_off(self):
+        path = self.file("e.txt", "吾輩は猫である\n")
+        session = self.start(path)
+        session.send(CTRL["s"] + "neko" + ESC + "m")
+        session.settle(0.3)
+        # Off, so romaji in a file that has none of it finds nothing.
+        self.assertIn("Failing I-search [literal]: neko", session.echo())
+        session.send(ESC + "m")
+        session.settle(0.3)
+        self.assertIn("I-search: neko", session.echo())
+        self.assertNotIn("Failing", session.echo())
+        # Where the search is left is where the next one starts.
+        session.send(ESC + "m" + RET + CTRL["s"])
+        session.settle(0.3)
+        self.assertIn("I-search [literal]:", session.echo())
+
     def test_query_replace(self):
         path = self.file("c.txt", "one two one two\n")
         session = self.start(path)

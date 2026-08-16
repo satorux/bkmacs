@@ -17,14 +17,15 @@ import os
 import re
 from typing import Optional
 
-from . import crypt
+from . import crypt, migemo
 from .buffer import Buffer, KillRing, Pos, advance, adjust
 from .display import (Display, Window, back_screen, point_screen, screen_rows,
                       segment_point)
 from .history import History
 from .layout import (display_width, expand, fill, index_at_column, pad,
                      span_at_columns, unfill)
-from .search import glob_regexp, search_backward, search_forward
+from .search import (glob_regexp, search_backward, search_backward_regexp,
+                     search_forward, search_forward_regexp)
 from .term import Terminal, with_meta
 
 #: How long the buffer has to sit still before it is written to its file.
@@ -128,6 +129,22 @@ def spans_of(regexp, line: str, offset: int) -> tuple:
                  for found in regexp.finditer(line) if found.end() > found.start())
 
 
+def isearch_start(anchor: Pos, pattern: str, forward: bool,
+                  migemo_on: bool) -> Pos:
+    """Where the search runs from when a pattern grows by one letter.
+
+    Forwards it is where the last search ran from.  Backwards it has to be a
+    little further on, or a match that begins at the anchor would be behind
+    the search and every keystroke would walk to an earlier one: as far on as
+    the pattern is long, except that the length of a migemo pattern is not the
+    length of anything it matches, and one character is enough.
+    """
+    if forward:
+        return anchor
+    return ((anchor[0], anchor[1] + 1) if migemo_on
+            else advance(anchor, pattern))
+
+
 def in_columns(items: list[str], width: int) -> list[str]:
     """Lay a list out in columns, measured rather than counted."""
     step = max(display_width(item) for item in items) + 2
@@ -205,6 +222,11 @@ class Editor:
         self.running = True
         self.last_command = ""
         self.pending: Optional[str] = None
+        #: Whether a search reads romaji as Japanese.  On, because a search
+        #: that has to be switched into the mode it is nearly always wanted in
+        #: is a search that is switched on every time.  It stays wherever the
+        #: last search left it, the way the pattern does.
+        self.migemo_on = True
         self._yank_start: Optional[Pos] = None
         #: The window *Completions* is borrowing, and what to put back there.
         self._completions: Optional[tuple[int, Optional[tuple]]] = None
@@ -1718,31 +1740,61 @@ class Editor:
     def isearch_backward(self) -> None:
         self.isearch(False)
 
+    def matches(self, pattern: str, start: Pos, forward: bool,
+                migemo_on: bool) -> Optional[tuple]:
+        """Where ``pattern`` matches from ``start``, as the span it covers.
+
+        The span rather than the position because migemo searches with a
+        regexp: what ``kensaku`` matched may be the seven characters typed or
+        the two that mean it, and the caller cannot work out which from the
+        length of what is in the minibuffer.
+        """
+        if not pattern:
+            return None
+        if migemo_on:
+            regexp = migemo.compile(pattern)
+            if regexp is None:
+                return None
+            return (search_forward_regexp(self.buffer, regexp, start)
+                    if forward
+                    else search_backward_regexp(self.buffer, regexp, start))
+        found = (search_forward(self.buffer, pattern, start) if forward
+                 else search_backward(self.buffer, pattern, start))
+        if found is None:
+            return None
+        return (found, (found[0], found[1] + len(pattern)))
+
     def isearch(self, forward: bool) -> None:
         """Incremental search, with the history Emacs keeps so that DEL undoes.
 
         Each keystroke pushes the pattern, where the search started from and
         what it found; deleting a character pops back to exactly the state
         before it was typed, rather than searching again from scratch.
+
+        Whether migemo is on is pushed along with the rest, so that DEL takes
+        back an ``M-m`` the way it takes back a letter, and so that the state
+        on the screen is always the state that found what is highlighted.
+        Where the search leaves it is where the next search finds it.
         """
         buffer = self.buffer
         origin = buffer.point
         recalled = -1  # Position in the saved search ring, if it is walked.
-        history: list[tuple[str, Pos, Optional[Pos]]] = [("", origin, None)]
+        history: list[tuple[str, Pos, Optional[tuple], bool]] = [
+            ("", origin, None, self.migemo_on)]
         while True:
-            pattern, anchor, found = history[-1]
+            pattern, anchor, found, migemo_on = history[-1]
             if found is not None:
-                end = (found[0], found[1] + len(pattern))
                 # What is highlighted is the region, so the mark goes to
                 # whichever end of the match the point is not at.  Searching
                 # backwards the point is at the front of the match, the way
                 # Emacs leaves it, and a mark left there as well would be a
                 # region of no width: the search finds it and shows nothing.
-                buffer.point, buffer.mark = ((end, found) if forward
-                                             else (found, end))
+                buffer.point, buffer.mark = ((found[1], found[0]) if forward
+                                             else (found[0], found[1]))
                 buffer.mark_active = True
-            prompt = "%sI-search%s: " % (
+            prompt = "%sI-search%s%s: " % (
                 "" if found is not None or not pattern else "Failing ",
+                self.migemo_tag(migemo_on),
                 "" if forward else " backward")
             self.redisplay(minibuffer=(prompt, pattern, len(pattern)),
                            parens=())
@@ -1763,16 +1815,16 @@ class Editor:
                         continue
                     repeat = ring[0]
                 elif not forward:
-                    start = found or start
+                    start = found[0] if found is not None else start
                 elif found is not None:
-                    start = (found[0], found[1] + 1)
-                hit = (search_forward(buffer, repeat, start) if forward
-                       else search_backward(buffer, repeat, start))
+                    start = (found[0][0], found[0][1] + 1)
+                hit = self.matches(repeat, start, forward, migemo_on)
                 if hit is None:  # Wrap, the way isearch does on a second try.
-                    hit = (search_forward(buffer, repeat, (0, 0)) if forward
-                           else search_backward(buffer, repeat, buffer.last))
+                    hit = self.matches(repeat,
+                                       (0, 0) if forward else buffer.last,
+                                       forward, migemo_on)
                     self.message = "Wrapped"
-                history.append((repeat, start, hit))
+                history.append((repeat, start, hit, migemo_on))
             elif key in ("DEL", "C-h"):
                 if len(history) > 1:
                     history.pop()
@@ -1786,28 +1838,46 @@ class Editor:
                 break
             elif key == "C-z":
                 self.term.suspend()
+            elif key == "M-m":  # What migemo.el binds inside isearch too.
+                start = isearch_start(anchor, pattern, forward, not migemo_on)
+                hit = self.matches(pattern, start, forward, not migemo_on)
+                history.append((pattern, anchor, hit, not migemo_on))
             elif key in ("M-p", "M-n"):
                 ring = self.history.get("search")
                 if ring:
                     recalled += 1 if key == "M-p" else -1
                     recalled = max(0, min(recalled, len(ring) - 1))
-                    hit = (search_forward(buffer, ring[recalled], origin)
-                           if forward
-                           else search_backward(buffer, ring[recalled],
-                                                buffer.last))
-                    history.append((ring[recalled], origin, hit))
+                    hit = self.matches(ring[recalled],
+                                       origin if forward else buffer.last,
+                                       forward, migemo_on)
+                    history.append((ring[recalled], origin, hit, migemo_on))
             elif len(key) == 1 and key.isprintable():
                 extended = pattern + key
-                hit = (search_forward(buffer, extended, anchor) if forward
-                       else search_backward(buffer, extended,
-                                            advance(anchor, extended)))
-                history.append((extended, anchor, hit))
+                start = isearch_start(anchor, extended, forward, migemo_on)
+                hit = self.matches(extended, start, forward, migemo_on)
+                history.append((extended, anchor, hit, migemo_on))
             else:
                 self.pending = key  # Any other key ends the search and runs.
                 break
         if history[-1][0]:
             self.history.add("search", history[-1][0])
+        self.migemo_on = history[-1][3]
         buffer.mark_active = False
+
+    def migemo_tag(self, migemo_on: bool) -> str:
+        """What the prompt says about migemo, which is nothing when it is on.
+
+        On is the ordinary state, and the ordinary state is the one that does
+        not need announcing -- ``I-search:`` is what it has always said.  Two
+        things do need announcing.  Off, so that a search finding only what
+        was literally typed is a search that was told to.  And on without a
+        dictionary, since that still finds kana and katakana and so does not
+        look broken; it looks like a search that has quietly stopped knowing
+        kanji, which is a strange thing to have to work out for yourself.
+        """
+        if not migemo_on:
+            return " [literal]"
+        return "" if migemo.dictionary.available else " [migemo: no dictionary]"
 
     def query_replace(self) -> None:
         """``M-%``.  One undo group for the whole session, so that a run of

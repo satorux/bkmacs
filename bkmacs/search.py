@@ -7,6 +7,12 @@ nothing on the buffer sizes this editor is for and keeps every result in the
 Case follows Emacs' rule, which is worth keeping because it is invisible until
 you need it: a search typed in lower case ignores case, and typing a single
 capital makes the search exact.
+
+Two kinds of search live here.  A literal one answers with the position it
+found, since the caller typed the text and knows how long it is.  A regexp
+one, which is what migemo searches with, answers with the whole span: ``kens``
+can match four characters of romaji or two of kanji, and only the match knows
+which.
 """
 
 from __future__ import annotations
@@ -41,6 +47,66 @@ def search_forward(buffer: Buffer, pattern: str, start: Pos,
         if bound is not None and row >= bound[0]:
             return None
         row += 1
+    return None
+
+
+def _match_at(regexp, line: str, index: int):
+    """The first non-empty match in ``line`` at or after ``index``.
+
+    Empty matches are stepped over rather than returned.  Nothing migemo
+    builds can match nothing, but a search that answered with a match of no
+    width would leave the point where it was and call it a hit, and the next
+    keystroke would do it again.
+    """
+    while index <= len(line):
+        found = regexp.search(line, index)
+        if found is None:
+            return None
+        if found.end() > found.start():
+            return found
+        index = found.start() + 1
+    return None
+
+
+def search_forward_regexp(buffer: Buffer, regexp, start: Pos,
+                          bound: Optional[Pos] = None) -> Optional[tuple]:
+    """Where ``regexp`` next matches at or after ``start``, as a span."""
+    row, column = start
+    while row < len(buffer.lines):
+        found = _match_at(regexp, buffer.lines[row],
+                          column if row == start[0] else 0)
+        if found is not None:
+            span = ((row, found.start()), (row, found.end()))
+            if bound is not None and span[1] > bound:
+                return None
+            return span
+        if bound is not None and row >= bound[0]:
+            return None
+        row += 1
+    return None
+
+
+def search_backward_regexp(buffer: Buffer, regexp,
+                           start: Pos) -> Optional[tuple]:
+    """Where ``regexp`` last begins strictly before ``start``, as a span.
+
+    Found by walking the line forwards and keeping the last match, which is
+    what a regexp leaves you: there is no way to match one right to left, and
+    a line short enough to be on a screen is short enough to scan twice.
+    """
+    row, column = start
+    while row >= 0:
+        line = buffer.lines[row]
+        limit = column if row == start[0] else len(line) + 1
+        last = None
+        for found in regexp.finditer(line):
+            if found.start() >= limit:
+                break
+            if found.end() > found.start():
+                last = found
+        if last is not None:
+            return ((row, last.start()), (row, last.end()))
+        row -= 1
     return None
 
 
