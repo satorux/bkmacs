@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -83,6 +84,35 @@ class TestLayout(unittest.TestCase):
         segments = split_columns("あいう", 5)
         self.assertEqual([(s.start, s.end) for s in segments], [(0, 2), (2, 3)])
         self.assertEqual(segments[0].width, 4)  # One column left before the \.
+
+    def test_a_long_line_is_laid_out_in_one_pass(self):
+        # The cost of laying a line out has to be the length of the line, not
+        # the length times the rows it wraps onto: measuring what was left
+        # for every row was quadratic, and a line of sixty-four thousand
+        # characters took thirteen seconds to put on the screen.
+        line = "x" * 64_000
+        start = time.monotonic()
+        segments = split_columns(expand(line).text, 80)
+        self.assertEqual(len(segments), 811)
+        self.assertLess(time.monotonic() - start, 2.0)
+        # The last row holds what is left over, and the ones before it give
+        # up a column each to the continuation marker.
+        self.assertEqual(segments[0].width, 79)
+        self.assertEqual(segments[-1].end, 64_000)
+
+    def test_the_fast_path_for_plain_lines_agrees_with_the_slow_one(self):
+        # expand answers by arithmetic when every character is one ASCII
+        # column, which is most lines; anything else walks them.  The two
+        # have to give the same answer where they overlap.
+        for text in ("plain ascii text", "", " leading and trailing ",
+                     "~!@#$%^&*()_+", "a" * 500):
+            plain = expand(text)
+            self.assertEqual(plain.text, text)
+            self.assertEqual(plain.columns, list(range(len(text) + 1)))
+            self.assertEqual(plain.owners, list(range(len(text))))
+        # And the walk still happens for everything else.
+        self.assertEqual(expand("a\tb").text, "a" + " " * 7 + "b")
+        self.assertEqual(expand("あ").columns, [0, 2])
 
     def test_short_line_is_one_segment(self):
         self.assertEqual(len(split_columns("abc", 80)), 1)

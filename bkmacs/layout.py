@@ -75,6 +75,13 @@ def expand(text: str, tab_width: int = TAB_WIDTH) -> Expanded:
     produced when the file was read; they are shown in octal, the way Emacs
     shows a raw byte, and they survive back to disk untouched.
     """
+    if text.isascii() and text.isprintable():
+        # Which is most lines, and every line of a minified file: each
+        # character stands for itself and is one column wide, so the answer
+        # is arithmetic rather than a walk with a width lookup per character.
+        return Expanded(text, list(range(len(text) + 1)),
+                        list(range(len(text))))
+
     pieces: list[str] = []
     columns: list[int] = []
     owners: list[int] = []
@@ -144,6 +151,15 @@ def split_columns(expanded: str, width: int) -> list[Segment]:
     the line keeps all of them.  A wide character that will not fit in what is
     left simply starts the next row, which leaves the column before the marker
     blank -- Emacs does the same.
+
+    How much of the line is left is counted rather than measured.  Measuring
+    it -- ``display_width(expanded[start:])`` once per row -- is a pass over
+    the rest of the line for every row of it, which is quadratic and is only
+    invisible while lines are short: a line of four thousand characters took
+    38 milliseconds to lay out that way, one of sixty-four thousand took
+    thirteen seconds, and a minified file was not openable at all.  The
+    columns already used come to the same number by subtraction, since every
+    character is counted into exactly one row.
     """
     if width <= 1:
         width = 2  # Degenerate, but never divide the screen into nothing.
@@ -154,8 +170,9 @@ def split_columns(expanded: str, width: int) -> list[Segment]:
     start = 0
     column = 0
     length = len(expanded)
+    total = display_width(expanded)
     while start < length:
-        remaining = display_width(expanded[start:])
+        remaining = total - column
         if remaining <= width:
             segments.append(Segment(start, length, column, remaining))
             break
