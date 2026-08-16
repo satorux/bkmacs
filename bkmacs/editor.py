@@ -178,7 +178,7 @@ class Editor:
 
     CTRL_X = {
         "r": RECTANGLE,  # A prefix of its own; see dispatch.
-        "C-f": "find-file", "C-s": "save-buffer",
+        "C-f": "find-file", "C-v": "find-alternate-file", "C-s": "save-buffer",
         "C-c": "save-buffers-kill-terminal",
         "b": "switch-to-buffer", "k": "kill-buffer", "C-b": "list-buffers",
         "C-x": "exchange-point-and-mark", "u": "undo",
@@ -946,6 +946,33 @@ class Editor:
         if not self.open_path(path):
             self.message = "(New file)"
 
+    def find_alternate_file(self) -> None:
+        """``C-x C-v``: visit another file in place of this one.
+
+        The prompt starts out holding the name of the file that is here
+        already, which is what makes ``C-x C-v RET`` the way to read a file
+        again from scratch: the buffer is killed and the file opened afresh,
+        so nothing the editor thought it knew about it survives -- not the
+        text, not the undo history, not where point was.
+
+        ``M-x revert-buffer`` is the gentler half of the same idea and keeps
+        point where it was, since it knows the file has not changed identity.
+        This one does not, because it is not really a reload: it is a visit,
+        and the file it visits is usually a different one.
+        """
+        buffer = self.buffer
+        start = (abbreviate(buffer.path) if buffer.path
+                 else abbreviate(os.getcwd()) + "/")
+        answer = self.read_string("Find alternate file: ", start,
+                                  completer=self.complete_path, kind="file")
+        if not answer:
+            return
+        path = os.path.abspath(os.path.expanduser(answer))
+        if not self.kill_buffer():  # Asked about, and said no to.
+            return
+        if not self.open_path(path):
+            self.message = "(New file)"
+
     def open_path(self, path: str) -> bool:
         """Visit ``path``, reusing its buffer if it is already open."""
         for index, buffer in enumerate(self.buffers):
@@ -1107,7 +1134,9 @@ class Editor:
             return None, []
         return os.path.commonprefix(matches), matches
 
-    def kill_buffer(self) -> None:
+    def kill_buffer(self) -> bool:
+        """``C-x k``.  False if it asked and was told not to, which is what
+        find-alternate-file needs to know before it opens anything."""
         buffer = self.buffer
         # An encrypted buffer has not been autosaved, so this is the last
         # chance to write it; an unnamed one has nowhere to be written at all.
@@ -1117,7 +1146,7 @@ class Editor:
         if buffer.modified and (buffer.path is None or buffer.encrypted):
             if not self.yes_or_no("Buffer %s modified; kill anyway? "
                                   % buffer.name):
-                return
+                return False
         elif (buffer.modified and buffer.path is not None
                 and not buffer.conflict):
             buffer.save()
@@ -1132,6 +1161,7 @@ class Editor:
             elif window.index == gone:
                 window.index = min(gone, len(self.buffers) - 1)
         self.previous = min(self.previous, len(self.buffers) - 1)
+        return True
 
     def list_buffers(self) -> None:
         rows = ["%s %-24s %s" % ("*" if b.modified else " ", b.name,

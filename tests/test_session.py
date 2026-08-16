@@ -418,6 +418,41 @@ class SessionTest(unittest.TestCase):
         self.assertIn("I-search backward: beta", session.echo())
         self.assertEqual(self.highlighted(session, 3), "beta")
 
+    def test_find_alternate_file_reads_the_file_again(self):
+        path = self.file("g.txt", "one\ntwo\nthree\n")
+        session = self.start(path)
+        session.send(CTRL["n"] + CTRL["n"])
+        session.settle(0.3)
+        session.send(CTRL["x"] + CTRL["v"])
+        session.settle(0.4)
+        # The prompt starts out holding the name of the file already here,
+        # which is what makes RET on its own mean "again".
+        self.assertIn("Find alternate file: ", session.echo())
+        self.assertIn("g.txt", session.echo())
+        with open(path, "w") as handle:
+            handle.write("one\ntwo\nthree\nfour\n")
+        session.send(RET)
+        session.settle(0.5)
+        self.assertEqual(session.display.row(3), "four")
+        # Read afresh, so point is at the top rather than where it was.
+        self.assertIn("(1,0)", session.mode_line())
+
+    def test_find_alternate_file_takes_the_old_buffer_s_place(self):
+        path = self.file("h.txt", "aaa\n")
+        self.file("i.txt", "bbb\n")
+        session = self.start(path)
+        session.send(CTRL["x"] + CTRL["v"])
+        session.settle(0.4)
+        session.send(DEL * len("h.txt") + "i.txt" + RET)
+        session.settle(0.5)
+        self.assertEqual(session.display.row(0), "bbb")
+        self.assertIn("i.txt", session.mode_line())
+        # The buffer it was visiting is gone, not left behind: that is the
+        # difference between this and C-x C-f.
+        session.send(CTRL["x"] + CTRL["b"])
+        session.settle(0.4)
+        self.assertNotIn("h.txt", session.screen())
+
     def test_query_replace(self):
         path = self.file("c.txt", "one two one two\n")
         session = self.start(path)

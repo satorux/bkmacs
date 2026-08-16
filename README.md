@@ -142,10 +142,11 @@ you had typed it.
 | Key | Command | |
 | --- | --- | --- |
 | `C-x C-f` | find-file | `TAB` completes |
+| `C-x C-v` | find-alternate-file | in place of this buffer; `RET` on the name already there reads the file again |
 | `C-x C-s` | save-buffer | rarely needed; see the autosave below — except for [encrypted files](#encrypted-files), where it is the only way |
 | `C-x b` `C-x k` | switch-to-buffer, kill-buffer | |
 | `C-x C-b` | list-buffers | |
-| `M-x revert-buffer` | revert-buffer | |
+| `M-x revert-buffer` | revert-buffer | the same file again, keeping point |
 | `C-x C-c` | exit | |
 
 ### Windows
