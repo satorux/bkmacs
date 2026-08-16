@@ -360,6 +360,64 @@ class SessionTest(unittest.TestCase):
         session.settle(1.0)
         self.assertEqual(self.contents(path), "alpha\nbeta\ngam\n")
 
+    def highlighted(self, session, row: int) -> str:
+        """The characters drawn in reverse video on one row of the screen."""
+        return "".join(character for character, styles
+                       in session.display.cells[row] if "reverse" in styles)
+
+    def test_isearch_backward_shows_what_it_found(self):
+        # The match is highlighted by being the region, and searching
+        # backwards leaves point at the front of it -- so the mark has to go
+        # to the far end.  Both at the front is a region of no width: the
+        # search works and the screen says nothing about it.
+        path = self.file("d.txt", "beta one\nalpha\nbeta two\n")
+        session = self.start(path)
+        session.send(ESC + ">")  # M->, since backwards from the top finds
+        session.settle(0.3)      # nothing at all.
+        session.send(CTRL["r"] + "beta")
+        session.settle(0.4)
+        self.assertIn("I-search backward: beta", session.echo())
+        self.assertEqual(self.highlighted(session, 2), "beta")
+        # And on again to the one before it.
+        session.send(CTRL["r"])
+        session.settle(0.4)
+        self.assertEqual(self.highlighted(session, 0), "beta")
+        # Point is left at the front of the match, which is where C-d bites.
+        session.send(RET + CTRL["d"])
+        session.settle(1.0)
+        self.assertEqual(self.contents(path), "eta one\nalpha\nbeta two\n")
+
+    def test_a_second_control_s_repeats_the_last_search(self):
+        path = self.file("e.txt", "alpha\nbeta\ngamma\nbeta\n")
+        session = self.start(path)
+        session.send(CTRL["s"] + "beta" + RET)
+        session.settle(0.4)
+        session.send(ESC + "<")  # Back to the top, with nothing typed.
+        session.settle(0.3)
+        session.send(CTRL["s"] + CTRL["s"])
+        session.settle(0.5)
+        # The recalled search is in the minibuffer as though it were typed,
+        # and it has found the first beta.
+        self.assertIn("I-search: beta", session.echo())
+        self.assertEqual(self.highlighted(session, 1), "beta")
+        # DEL takes the recall back off again, like any other keystroke.
+        session.send(DEL)
+        session.settle(0.3)
+        self.assertIn("I-search:", session.echo())
+        self.assertNotIn("beta", session.echo())
+
+    def test_a_second_control_r_repeats_it_backwards(self):
+        path = self.file("f.txt", "alpha\nbeta\ngamma\nbeta\n")
+        session = self.start(path)
+        session.send(CTRL["s"] + "beta" + RET)
+        session.settle(0.4)
+        session.send(ESC + ">")
+        session.settle(0.3)
+        session.send(CTRL["r"] + CTRL["r"])
+        session.settle(0.5)
+        self.assertIn("I-search backward: beta", session.echo())
+        self.assertEqual(self.highlighted(session, 3), "beta")
+
     def test_query_replace(self):
         path = self.file("c.txt", "one two one two\n")
         session = self.start(path)

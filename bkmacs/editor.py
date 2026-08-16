@@ -1703,8 +1703,14 @@ class Editor:
             pattern, anchor, found = history[-1]
             if found is not None:
                 end = (found[0], found[1] + len(pattern))
-                buffer.mark, buffer.mark_active = found, True
-                buffer.point = end if forward else found
+                # What is highlighted is the region, so the mark goes to
+                # whichever end of the match the point is not at.  Searching
+                # backwards the point is at the front of the match, the way
+                # Emacs leaves it, and a mark left there as well would be a
+                # region of no width: the search finds it and shows nothing.
+                buffer.point, buffer.mark = ((end, found) if forward
+                                             else (found, end))
+                buffer.mark_active = True
             prompt = "%sI-search%s: " % (
                 "" if found is not None or not pattern else "Failing ",
                 "" if forward else " backward")
@@ -1715,18 +1721,28 @@ class Editor:
                 continue
             if key in ("C-s", "C-r"):
                 forward = key == "C-s"
-                if not pattern and len(history) == 1:
-                    continue
-                start = buffer.point if forward else (found or buffer.point)
-                if forward and found is not None:
+                repeat, start = pattern, buffer.point
+                if not repeat:
+                    # C-s C-s, which is isearch-repeat-forward with nothing
+                    # typed: the search you mean is the one you did last, and
+                    # recalling it is quicker than typing it again.  Emacs
+                    # puts it in the minibuffer as though you had, and so
+                    # does this -- DEL takes it back off again.
+                    ring = self.history.get("search")
+                    if not ring:
+                        continue
+                    repeat = ring[0]
+                elif not forward:
+                    start = found or start
+                elif found is not None:
                     start = (found[0], found[1] + 1)
-                hit = (search_forward(buffer, pattern, start) if forward
-                       else search_backward(buffer, pattern, start))
+                hit = (search_forward(buffer, repeat, start) if forward
+                       else search_backward(buffer, repeat, start))
                 if hit is None:  # Wrap, the way isearch does on a second try.
-                    hit = (search_forward(buffer, pattern, (0, 0)) if forward
-                           else search_backward(buffer, pattern, buffer.last))
+                    hit = (search_forward(buffer, repeat, (0, 0)) if forward
+                           else search_backward(buffer, repeat, buffer.last))
                     self.message = "Wrapped"
-                history.append((pattern, start, hit))
+                history.append((repeat, start, hit))
             elif key in ("DEL", "C-h"):
                 if len(history) > 1:
                     history.pop()

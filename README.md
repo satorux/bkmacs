@@ -120,6 +120,7 @@ key of the same effect.
 | Key | Command | |
 | --- | --- | --- |
 | `C-s` `C-r` | isearch forward, backward | `DEL` steps back through the search itself; wraps on a second try |
+| `C-s C-s` `C-r C-r` | isearch-repeat | with nothing typed, the search you did last |
 | `M-%` | query-replace | `y` `n` `!` `.` `q`; one undo takes back the whole session |
 | `M-x grep` | grep | Python regexps, over a tree of files |
 | `M-x occur` | occur | the same, over this buffer |
@@ -128,6 +129,13 @@ key of the same effect.
 A pattern typed in lower case ignores case; one capital letter makes it
 exact. With the region active, query-replace works inside it and nowhere
 else.
+
+A search shows what it found by highlighting it, and leaves point at the
+end of the match going forwards and at the front of it going backwards,
+which is where Emacs leaves it and where the next `C-d` or `C-k` will
+bite. `M-p` and `M-n` walk back through earlier searches; `C-s` or `C-r`
+with nothing typed yet recalls the last one, which then behaves as though
+you had typed it.
 
 ### Files and buffers
 
