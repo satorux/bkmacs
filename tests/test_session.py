@@ -542,6 +542,17 @@ class SessionTest(unittest.TestCase):
         session.send(ESC + "m" + RET + CTRL["s"])
         self.assertEcho(session, "I-search [literal]:")
 
+    def test_the_case_of_a_word(self):
+        path = self.file("case.txt", "hello brave new world\n")
+        session = self.start(path)
+        session.send(ESC + "c")            # M-c: Hello, point after it.
+        session.send(ESC + "u")            # M-u: BRAVE.
+        session.send(ESC + "l")            # M-l: new, already down.
+        self.assertSaved(path, "Hello BRAVE new world\n")
+        # And from the middle of a word, from point on -- as Emacs does it.
+        session.send(CTRL["a"] + CTRL["f"] * 3 + ESC + "u")
+        self.assertSaved(path, "HelLO BRAVE new world\n")
+
     def test_query_replace(self):
         path = self.file("c.txt", "one two one two\n")
         session = self.start(path)

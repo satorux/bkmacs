@@ -102,6 +102,7 @@ key of the same effect.
 | `M-q` | fill-paragraph | rewraps to 74 columns, kinsoku and all |
 | `C-x SPC` | fixup-whitespace | |
 | `C-x C-u` `C-x C-l` | upcase-region, downcase-region | |
+| `M-u` `M-l` `M-c` | upcase, downcase, capitalize the word | from point to the end of it, and point lands there |
 | `C-/` `C-_` `C-\` | undo | Emacs' undo ring — see below |
 
 ### The region

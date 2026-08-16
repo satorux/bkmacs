@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bkmacs.history
 from bkmacs import crypt, migemo
 from bkmacs.buffer import Buffer, KillRing, advance, adjust
-from bkmacs.editor import in_columns
+from bkmacs.editor import capitalized, in_columns
 from bkmacs.history import History
 from bkmacs.layout import (char_width, display_width, expand, fill,
                            index_at_column, joinable, span_at_columns,
@@ -719,6 +719,23 @@ class TestHistory(unittest.TestCase):
         self.assertEqual(len(history.get("file")), bkmacs.history.LIMIT)
         self.assertEqual(history.get("file")[0],
                          "file%d" % (bkmacs.history.LIMIT + 19))
+
+
+class TestCapitalized(unittest.TestCase):
+    def test_the_first_letter_goes_up_and_the_rest_come_down(self):
+        self.assertEqual(capitalized("hello"), "Hello")
+        self.assertEqual(capitalized("hELLO"), "Hello")
+
+    def test_the_letter_is_found_past_whatever_is_in_front_of_it(self):
+        # M-c takes the word from point, and point is usually on the space
+        # before it -- where str.capitalize would capitalize the space and
+        # call it done.
+        self.assertEqual(capitalized(" hello"), " Hello")
+        self.assertEqual(capitalized("  1st"), "  1St")
+
+    def test_a_word_with_no_letters_in_it_is_left_alone(self):
+        self.assertEqual(capitalized("123"), "123")
+        self.assertEqual(capitalized("日本語"), "日本語")
 
 
 class TestColumns(unittest.TestCase):

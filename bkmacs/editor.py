@@ -145,6 +145,20 @@ def isearch_start(anchor: Pos, pattern: str, forward: bool,
             else advance(anchor, pattern))
 
 
+def capitalized(text: str) -> str:
+    """The first letter up and the rest of the word down, as M-c does it.
+
+    Not :meth:`str.capitalize`, which would leave ``hello`` alone in ``
+    hello`` -- the first character of the span is often the space in front of
+    the word, and it is the first *letter* that goes up.
+    """
+    for index, character in enumerate(text):
+        if character.isalpha():
+            return (text[:index] + character.upper()
+                    + text[index + 1:].lower())
+    return text
+
+
 def in_columns(items: list[str], width: int) -> list[str]:
     """Lay a list out in columns, measured rather than counted."""
     step = max(display_width(item) for item in items) + 2
@@ -180,6 +194,7 @@ class Editor:
         "C-/": "undo", "C-_": "undo", "C-\\": "undo",
         "C-g": "keyboard-quit",
         "C-z": "suspend",
+        "M-c": "capitalize-word", "M-u": "upcase-word", "M-l": "downcase-word",
         "M-x": "execute-extended-command",
         "<resize>": "ignore",
     }
@@ -858,6 +873,25 @@ class Editor:
 
     def downcase_region(self) -> None:
         self.case_region(str.lower)
+
+    def upcase_word(self) -> None:
+        self.case_word(str.upper)
+
+    def downcase_word(self) -> None:
+        self.case_word(str.lower)
+
+    def capitalize_word(self) -> None:
+        self.case_word(capitalized)
+
+    def case_word(self, convert) -> None:
+        """``M-u``, ``M-l``, ``M-c``: the word from point on, and point after
+        it -- which is what makes a run of them walk along a line."""
+        start = self.buffer.point
+        self.forward_word()
+        end = self.buffer.point
+        text = convert(self.buffer.text_between(start, end))
+        self.buffer.edit(start, end, text)
+        self.buffer.point = advance(start, text)
 
     def case_region(self, convert) -> None:
         span = self.region()
