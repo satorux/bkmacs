@@ -237,7 +237,7 @@ class Editor:
         "C-c": "save-buffers-kill-terminal",
         "b": "switch-to-buffer", "k": "kill-buffer", "C-b": "list-buffers",
         "C-x": "exchange-point-and-mark", "u": "undo",
-        "h": "mark-whole-buffer",
+        "h": "mark-whole-buffer", "C-w": "write-file",
         " ": "fixup-whitespace", "`": "next-error",
         "2": "split-window-below", "1": "delete-other-windows",
         "0": "delete-window", "o": "other-window",
@@ -1139,6 +1139,48 @@ class Editor:
         else:
             buffer.save()
         self.message = "Wrote %s" % abbreviate(buffer.path)
+
+    def write_file(self) -> None:
+        """``C-x C-w``: write this buffer to some other file, and go on
+        editing it there.
+
+        The buffer changes what it is visiting, which is the difference
+        between this and copying the file afterwards: the autosave, the mode
+        line and C-x C-s all follow it to the new name.  Whether it is
+        encrypted follows the name too, so writing a buffer out as ``*.ossl``
+        is how one becomes encrypted and starts asking for a password.
+        """
+        buffer = self.buffer
+        answer = self.read_string(
+            "Write file: ",
+            abbreviate(buffer.path) if buffer.path
+            else abbreviate(os.getcwd()) + "/",
+            completer=self.complete_path, kind="file")
+        if not answer:
+            self.message = "Write cancelled"
+            return
+        path = os.path.abspath(os.path.expanduser(answer))
+        if os.path.isdir(path):
+            self.message = "%s is a directory" % abbreviate(path)
+            return
+        if os.path.exists(path) and path != buffer.path:
+            # Asked here rather than left to the save, which would ask the
+            # other question -- whether the file changed underneath -- about
+            # a file this buffer has never read.
+            # By its bare name: the question has to fit on the echo line,
+            # and the path was typed into the prompt just above it.
+            if not self.yes_or_no("%s exists; overwrite? "
+                                  % os.path.basename(path)):
+                self.message = "Write cancelled"
+                return
+        buffer.path = path
+        buffer.name = os.path.basename(path)
+        buffer.encrypted = crypt.is_encrypted(path)
+        buffer.disk_mtime = (os.path.getmtime(path) if os.path.exists(path)
+                             else None)
+        buffer.conflict = False
+        buffer.modified = True  # Even an untouched buffer has to be written.
+        self.save_buffer()
 
     # -- encrypted files -------------------------------------------------
 

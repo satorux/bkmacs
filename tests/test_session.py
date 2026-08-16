@@ -594,6 +594,33 @@ class SessionTest(unittest.TestCase):
         session.send("!")
         self.assertSaved(path, "b\nb\naa\n")
 
+    def test_write_file_carries_the_buffer_to_the_new_name(self):
+        path = self.file("w.txt", "text\n")
+        other = os.path.join(self.directory, "copy.txt")
+        session = self.start(path)
+        session.send(CTRL["x"] + CTRL["w"])
+        self.assertEcho(session, "Write file: ")
+        session.send(DEL * len("w.txt") + "copy.txt" + RET)
+        self.assertSaved(other, "text\n")
+        self.assertModeLine(session, "copy.txt")
+        # The buffer is visiting the new file now, so the autosave goes
+        # there and the old one is left as it was.
+        session.send(CTRL["e"] + "!")
+        self.assertSaved(other, "text!\n")
+        self.assertEqual(self.contents(path), "text\n")
+
+    def test_write_file_asks_before_overwriting(self):
+        path = self.file("v.txt", "mine\n")
+        self.file("theirs.txt", "theirs\n")
+        session = self.start(path)
+        session.send(CTRL["x"] + CTRL["w"])
+        session.send(DEL * len("v.txt") + "theirs.txt" + RET)
+        self.assertEcho(session, "exists; overwrite?")
+        session.send("n")
+        self.assertEcho(session, "Write cancelled")
+        self.assertEqual(self.contents(os.path.join(self.directory,
+                                                    "theirs.txt")), "theirs\n")
+
     def test_query_replace(self):
         path = self.file("c.txt", "one two one two\n")
         session = self.start(path)
